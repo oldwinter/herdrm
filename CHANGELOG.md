@@ -7,6 +7,12 @@ the Sparkle update description — a release without a section here fails CI.
 
 ## [Unreleased]
 
+### Added
+- Documented the proposed AI agent control plane: a JSON-first `herdrmctl`,
+  shared multi-device/session `HerdrFleet` module, Herdr API and HerdrKit reuse,
+  fleet/orchestrator skills, safety model, core architecture, and phased
+  implementation plan.
+
 ## [0.4.5] - 2026-08-23
 
 ### Changed
