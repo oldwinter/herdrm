@@ -106,6 +106,30 @@ final class SSHDestinationTests: XCTestCase {
 }
 
 final class AttachBinarySelectionTests: XCTestCase {
+    func testStandaloneTerminalCommandsMatchDeviceTransport() {
+        let local = HerdrService(
+            device: Device(name: "L", kind: .local),
+            autoStartLocalServer: false
+        ).terminalCommand()
+        XCTAssertEqual(local.executable, "/bin/sh")
+        XCTAssertTrue(local.args.last?.contains("exec \"${SHELL:-/bin/zsh}\" -l") == true)
+        XCTAssertNil(local.authorizationID)
+
+        let remote = HerdrService(
+            device: Device(
+                id: UUID(),
+                name: "R",
+                kind: .ssh(target: "user@example.test:2222")
+            ),
+            autoStartLocalServer: false
+        ).terminalCommand()
+        XCTAssertEqual(remote.executable, "/usr/bin/ssh")
+        XCTAssertTrue(remote.args.contains("-tt"))
+        XCTAssertTrue(remote.args.contains("StrictHostKeyChecking=accept-new"))
+        XCTAssertTrue(remote.args.contains("ServerAliveInterval=15"))
+        XCTAssertEqual(remote.args.last, "ssh://user@example.test:2222")
+    }
+
     func testKnownServerVersionProbesForAnExactMatch() {
         let fragment = HerdrService.attachBinarySelection(serverVersion: "0.8.2")
         XCTAssertTrue(fragment.contains("for d in $PATH"))
@@ -137,6 +161,35 @@ final class AttachBinarySelectionTests: XCTestCase {
         // The whole script must run under sh on the far side, not the login shell.
         XCTAssertTrue(remote.args.last?.hasPrefix("exec /bin/sh -c '") == true)
         XCTAssertTrue(remote.args.last?.contains("export PATH=") == true)
+        XCTAssertEqual(
+            remote.environment["HOME"],
+            ProcessInfo.processInfo.environment["HOME"],
+            "remote attach must inherit the local environment used by OpenSSH"
+        )
+        XCTAssertTrue(
+            remote.environment["PATH"]?.contains("/opt/homebrew/bin") == true,
+            "remote attach must expose Match exec helpers installed by Homebrew"
+        )
+        if let agentSocket = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
+            XCTAssertEqual(
+                remote.environment["SSH_AUTH_SOCK"], agentSocket,
+                "remote attach must preserve access to the caller's SSH agent"
+            )
+        }
+    }
+
+    func testOrdinaryTerminalAttachCommandsUseTerminalIDLocallyAndRemotely() {
+        let local = HerdrService(device: Device(name: "L", kind: .local), localServer: nil)
+            .attachCommand(target: .terminal(terminalID: "term_abc123"), serverVersion: "0.8.2")
+        XCTAssertTrue(
+            local.args.last?.contains("exec \"$hb\" terminal attach 'term_abc123' --takeover") == true
+        )
+
+        let remote = HerdrService(device: Device(name: "R", kind: .ssh(target: "u@h")), localServer: nil)
+            .attachCommand(target: .terminal(terminalID: "term_abc123"), serverVersion: "0.8.2")
+        XCTAssertEqual(remote.executable, "/usr/bin/ssh")
+        XCTAssertTrue(remote.args.last?.contains("terminal attach") == true)
+        XCTAssertTrue(remote.args.last?.contains("term_abc123") == true)
     }
 }
 
@@ -318,7 +371,99 @@ final class AgentAttachmentDeliveryPolicyTests: XCTestCase {
         XCTAssertNil(capabilityAwareRegistry.capabilities(for: "claude"))
     }
 
-    func testLocalDeliveryUsesNativeClipboardOnlyForImageData() {
+    /// herdr 0.8.2's `server.agent_manifests` reports only an id and version —
+    /// no aliases, no capabilities — so the built-in table has to recognize the
+    /// bare manifest ids. Kinds outside it must stay nil and paste as plain text.
+    func testBuiltInFallbackCoversVerifiedAgentKinds() throws {
+        let data = Data(
+            """
+            [
+              { "agent": "claude", "active_version": "2026.08.21.1" },
+              { "agent": "codex", "active_version": "2026.08.09.1" },
+              { "agent": "copilot", "active_version": "2026.07.07.1" },
+              { "agent": "cursor", "active_version": "2026.08.03.1" },
+              { "agent": "gemini", "active_version": "2026.06.10.1" },
+              { "agent": "grok", "active_version": "2026.07.16.2" },
+              { "agent": "opencode", "active_version": "2026.06.10.1" },
+              { "agent": "pi", "active_version": "2026.06.10.1" },
+              { "agent": "kimi", "active_version": "2026.06.10.1" }
+            ]
+            """.utf8
+        )
+        let registry = AgentAttachmentCapabilityRegistry(
+            manifests: try JSONDecoder().decode([AgentManifestInfo].self, from: data)
+        )
+
+        for kind in ["claude", "codex", "copilot", "cursor", "gemini", "grok", "opencode", "pi"] {
+            XCTAssertEqual(
+                registry.capabilities(for: kind),
+                pathCapabilities,
+                "\(kind) should support pasted attachments"
+            )
+        }
+
+        // herdr's own manifest aliases, in case detection ever reports one.
+        XCTAssertEqual(registry.capabilities(for: "cursor-agent"), pathCapabilities)
+        XCTAssertEqual(registry.capabilities(for: "grok-build"), pathCapabilities)
+        XCTAssertEqual(registry.capabilities(for: "open-code"), pathCapabilities)
+
+        // Advertised by herdr but unverified here: no capabilities, plain paste.
+        XCTAssertNil(registry.capabilities(for: "kimi"))
+        XCTAssertNil(registry.capabilities(for: "devin"))
+    }
+
+    func testVerifiedAgentsDeliverImagesLocallyAndRemotely() throws {
+        let data = Data(
+            """
+            [
+              { "agent": "cursor" },
+              { "agent": "gemini" },
+              { "agent": "grok" },
+              { "agent": "opencode" },
+              { "agent": "pi" }
+            ]
+            """.utf8
+        )
+        let registry = AgentAttachmentCapabilityRegistry(
+            manifests: try JSONDecoder().decode([AgentManifestInfo].self, from: data)
+        )
+        let remote = Device.Kind.ssh(target: "user@example.test")
+
+        for kind in ["cursor", "gemini", "grok", "opencode", "pi"] {
+            let capabilities = registry.capabilities(for: kind)
+            // Local: the agent shells out to osascript and reads the clipboard.
+            XCTAssertEqual(
+                AgentAttachmentDeliveryPolicy.action(
+                    capabilities: capabilities,
+                    deviceKind: .local,
+                    source: .imageData
+                ),
+                .nativeClipboard,
+                "\(kind) should read the local clipboard"
+            )
+            // Remote: the Mac clipboard is unreachable, so stage and paste paths.
+            XCTAssertEqual(
+                AgentAttachmentDeliveryPolicy.action(
+                    capabilities: capabilities,
+                    deviceKind: remote,
+                    source: .imageData
+                ),
+                .devicePaths(.shellQuoted),
+                "\(kind) should paste a staged remote path"
+            )
+            XCTAssertEqual(
+                AgentAttachmentDeliveryPolicy.action(
+                    capabilities: capabilities,
+                    deviceKind: .local,
+                    source: .files(allImages: false)
+                ),
+                .devicePaths(.shellQuoted),
+                "\(kind) should paste a local path for generic files"
+            )
+        }
+    }
+
+    func testLocalDeliveryUsesNativeClipboardForImages() {
         XCTAssertEqual(
             AgentAttachmentDeliveryPolicy.action(
                 capabilities: pathCapabilities,
@@ -327,13 +472,15 @@ final class AgentAttachmentDeliveryPolicyTests: XCTestCase {
             ),
             .nativeClipboard
         )
+        // Copied image files are images too: local agents that read clipboard
+        // images natively get the paste shortcut, not a quoted path.
         XCTAssertEqual(
             AgentAttachmentDeliveryPolicy.action(
                 capabilities: pathCapabilities,
                 deviceKind: .local,
                 source: .files(allImages: true)
             ),
-            .devicePaths(.shellQuoted)
+            .nativeClipboard
         )
         XCTAssertEqual(
             AgentAttachmentDeliveryPolicy.action(

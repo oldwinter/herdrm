@@ -73,7 +73,7 @@ public struct SocketRPC: Sendable {
 
     // MARK: - Wire helpers
 
-    static func encodeRequest(id: String, method: String, params: JSONValue?) -> Data {
+    public static func encodeRequest(id: String, method: String, params: JSONValue?) -> Data {
         // herdr requires `params` to be present even when empty.
         var object: [String: JSONValue] = ["id": .string(id), "method": .string(method)]
         object["params"] = params ?? .object([:])
@@ -81,7 +81,7 @@ public struct SocketRPC: Sendable {
         return data + Data([0x0A])
     }
 
-    static func decodeResponse(_ line: Data?) throws -> JSONValue {
+    public static func decodeResponse(_ line: Data?) throws -> JSONValue {
         guard let line, !line.isEmpty else { throw HerdrError.malformedResponse("empty reply") }
         let value: JSONValue
         do {
@@ -106,6 +106,18 @@ public struct SocketRPC: Sendable {
         }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw HerdrError.connectionFailed("socket(): \(String(cString: strerror(errno)))") }
+        var noSigPipe: Int32 = 1
+        guard setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSigPipe,
+            socklen_t(MemoryLayout.size(ofValue: noSigPipe))
+        ) == 0 else {
+            let reason = String(cString: strerror(errno))
+            close(fd)
+            throw HerdrError.connectionFailed("setsockopt(SO_NOSIGPIPE): \(reason)")
+        }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)

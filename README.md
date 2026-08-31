@@ -43,9 +43,10 @@ macOS window on top of it, and it's grown well past "attach to a terminal":
 | | |
 |---|---|
 | 🖥️ **Every device** | Local + remote over SSH — keys, Tailscale, or a Keychain password — with auto-reconnect |
-| 🧭 **Live status** | Spaces & Agents sorted by urgency: blocked → done → working → idle |
+| 🧭 **Live status** | Spaces, Agents & Terminals across every connected device |
 | ⌨️ **Real terminal** | Full PTY attach, not a chat wrapper — native selection, legible fonts, resilient sessions |
 | 📎 **Paste anything** | Files and images land straight in the agent's pane, locally or over SSH |
+| 📁 **Move files** | Browse Local + SSH files side by side and copy in either direction |
 | 🔔 **Notifications** | A system alert the moment an agent needs you — click it to jump right there |
 | 🔍 **⌘K search** | Every agent, on every device, one keystroke away |
 
@@ -63,20 +64,24 @@ macOS window on top of it, and it's grown well past "attach to a terminal":
   `AllowStreamLocalForwarding`, or *why* a disconnected device is unreachable — never a bare
   "not connected".
 
-### Spaces & Agents, always current
-- **Spaces & Agents sidebar** — every workspace and agent (claude, codex, gemini, grok,
-  opencode, …), same canonical order the ⌘K palette uses.
-- **New Agent / New Space** — locally the picker only lists advertised CLIs found on the
+### Spaces, Agents & Terminals, always current
+- **Spaces, Agents & Terminals sidebar** — every workspace, coding agent (claude, codex,
+  gemini, grok, opencode, …), and ordinary Herdr shell pane, across local and SSH devices.
+- **New Agent / New Terminal / New Space** — New Terminal creates a persistent shell tab in
+  any device and space. Locally the agent picker only lists advertised CLIs found on the
   login-shell PATH (captured once from a real interactive + login shell, not by grepping rc
   files or trusting LaunchServices); SSH devices follow the remote server's manifest catalog
   and validate on start. Each agent's bypass-permissions flag is on by default. **⌘N** for a
-  new agent, **⇧⌘N** for a new space. New Space includes an inline directory browser that
+  new agent, **⌘T** for a new terminal, **⇧⌘N** for a new space. New Space includes an inline directory browser that
   works over SSH. Settings → Agents accepts a per-kind binary path when detection is wrong.
 - Spaces rename straight from the sidebar's context menu.
 
 ### A real terminal, not a chat wrapper
-- **Live terminal** — attaches directly to the agent's PTY (`herdr agent attach`); grabs
+- **Live terminal** — attaches directly to an agent or shell PTY (`herdr agent attach` /
+  `herdr terminal attach`); grabs
   keyboard focus the moment you jump in from ⌘K, the sidebar, or a notification.
+- **Standalone terminals** — open a local login shell or choose any configured SSH device;
+  remote shells reuse the same OpenSSH config, agent, host-key, and Keychain password flow.
 - **Native text selection** — drag to select, no Shift needed; right-click for Copy/Paste/Select
   All plus link actions (⌘-click opens a URL).
 - **Legibility controls** — Thin strokes, font Weight, and Line spacing settings.
@@ -86,8 +91,13 @@ macOS window on top of it, and it's grown well past "attach to a terminal":
   of freezing on the last frame; mixed-version `herdr` binaries no longer break attach.
 
 ### Files, search, and staying in the loop
-- **Paste files and images** into Claude Code, Codex, or Copilot. Local pastes forward as
-  Ctrl+V; remote pastes stream over SSH into a self-pruning cache (7-day retention, 50 MB cap).
+- **Two-pane file manager** — browse Local and any configured SSH device side by side, then
+  upload or download regular files with progress, cancellation, and explicit Replace / Keep
+  Both conflict handling. Transfers use the same OpenSSH config, agent, host-key, and Keychain
+  password flow as terminals.
+- **Paste files and images** into Claude Code, Codex, Copilot, Cursor, Gemini, Grok, OpenCode,
+  or pi. Local pastes forward as Ctrl+V so the agent reads the clipboard itself; remote pastes
+  stream over SSH into a self-pruning cache (7-day retention, 50 MB cap) and paste the path.
 - **Search** — ⌘K across every device, ordered by urgency, scrolling to follow your selection.
 - **Notifications** — a sound and a system alert when any agent finishes or needs input;
   clicking jumps straight to it. Agents you're already watching stay quiet.
