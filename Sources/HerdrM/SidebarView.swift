@@ -24,6 +24,11 @@ struct SidebarView: View {
     @State private var deviceButtonHovered = false
     @State private var draggingSpaceID: String?
     @State private var spaceDrop: (id: String, after: Bool)?
+    @State private var draggingAgentID: String?
+    @State private var agentDrop: (id: String, after: Bool)?
+    @State private var spacesExpanded = true
+    @State private var agentsExpanded = true
+    @State private var terminalsExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,10 +48,13 @@ struct SidebarView: View {
                 actionRow(icon: "square.and.pencil", label: "New Agent") {
                     model.showNewAgent = true
                 }
-                // Every click opens another standalone local shell, listed under
-                // TERMINALS below — the ⌘D split beside an agent is separate.
+                // Terminals — herdr-owned or standalone — are listed under
+                // TERMINALS below; the ⌘D split beside an agent is separate.
                 actionRow(icon: "terminal", label: "New Terminal") {
-                    model.newShellSession()
+                    model.showNewTerminal = true
+                }
+                actionRow(icon: "folder", label: "Files") {
+                    model.openFileManager()
                 }
                 actionRow(icon: "magnifyingglass", label: "Search") {
                     model.showSearch = true
@@ -58,14 +66,11 @@ struct SidebarView: View {
 
             ScrollView {
                 VStack(spacing: 1) {
-                    HStack(spacing: 5) {
-                        Text("Spaces")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(Theme.textTertiary)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.textGhost)
-                        Spacer()
+                    // Title + chevron used to be a decorative HStack with no
+                    // tap target, so the chevron promised a disclosure that
+                    // never fired. Trailing New Space stays a sibling Button
+                    // so it does not toggle the section.
+                    groupHeader("Spaces", expanded: $spacesExpanded) {
                         Button {
                             model.showNewSpace = true
                         } label: {
@@ -77,48 +82,61 @@ struct SidebarView: View {
                         }
                         .buttonStyle(.plain)
                         .help("New Space")
+                        .focusEffectDisabled()
                     }
-                    .padding(.horizontal, 8)
-                    .frame(height: 28)
-                    allSpacesRow
-                    ForEach(model.visibleSpaces) { entry in
-                        SpaceRowView(
-                            entry: entry,
-                            model: model,
-                            draggingSpaceID: $draggingSpaceID,
-                            spaceDrop: $spaceDrop
-                        )
+                    if spacesExpanded {
+                        allSpacesRow
+                        ForEach(model.visibleSpaces) { entry in
+                            SpaceRowView(
+                                entry: entry,
+                                model: model,
+                                draggingSpaceID: $draggingSpaceID,
+                                spaceDrop: $spaceDrop
+                            )
+                        }
                     }
 
                     Spacer().frame(height: 10)
 
-                    groupHeader("Agents")
-                    if model.visibleAgents.isEmpty {
-                        Text(emptyAgentsHint)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Theme.textGhost)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                    }
-                    ForEach(model.visibleAgents) { entry in
-                        agentRow(entry)
-                            .contextMenu {
-                                Button("Close Agent…", role: .destructive) {
-                                    model.requestClosePane(entry.ref, name: entry.agent.title)
-                                }
-                            }
+                    groupHeader("Agents", expanded: $agentsExpanded)
+                    if agentsExpanded {
+                        if model.visibleAgents.isEmpty {
+                            Text(emptyAgentsHint)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.textGhost)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                        }
+                        ForEach(model.visibleAgents) { entry in
+                            AgentRowView(
+                                entry: entry,
+                                model: model,
+                                draggingAgentID: $draggingAgentID,
+                                agentDrop: $agentDrop
+                            )
+                        }
                     }
 
-                    if !model.shellSessions.isEmpty {
+                    if !model.visibleTerminals.isEmpty || !model.shellSessions.isEmpty {
                         Spacer().frame(height: 10)
-                        groupHeader("Terminals")
-                        ForEach(model.shellSessions) { session in
-                            shellRow(session)
-                                .contextMenu {
-                                    Button("Close Terminal", role: .destructive) {
-                                        model.closeShellSession(session.id)
+                        groupHeader("Terminals", expanded: $terminalsExpanded)
+                        if terminalsExpanded {
+                            ForEach(model.visibleTerminals) { entry in
+                                terminalRow(entry)
+                                    .contextMenu {
+                                        Button("Close Terminal…", role: .destructive) {
+                                            model.requestClosePane(entry.ref, name: entry.title)
+                                        }
                                     }
-                                }
+                            }
+                            ForEach(model.shellSessions) { session in
+                                shellRow(session)
+                                    .contextMenu {
+                                        Button("Close Terminal", role: .destructive) {
+                                            model.closeShellSession(session.id)
+                                        }
+                                    }
+                            }
                         }
                     }
                 }
@@ -134,15 +152,15 @@ struct SidebarView: View {
 
     private var emptyAgentsHint: String {
         switch model.connection {
-        case .connecting: return "Connecting…"
+        case .connecting: return String(localized: "Connecting…")
         case .failed(let reason): return reason
-        default: return "No agents"
+        default: return String(localized: "No agents")
         }
     }
 
     // MARK: - Rows
 
-    private func actionRow(icon: String, label: String, action: @escaping () -> Void) -> some View {
+    private func actionRow(icon: String, label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
@@ -159,17 +177,44 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(SidebarRowButtonStyle())
+        // CSS `outline: none` is not a SwiftUI concept. This is the native
+        // equivalent for chrome (New Agent / New Terminal / Search). List
+        // rows keep their focus ring for keyboard access.
+        .focusEffectDisabled()
     }
 
-    private func groupHeader(_ title: String) -> some View {
+    private func groupHeader(_ title: LocalizedStringKey, expanded: Binding<Bool>) -> some View {
+        groupHeader(title, expanded: expanded) { EmptyView() }
+    }
+
+    private func groupHeader<Trailing: View>(
+        _ title: LocalizedStringKey,
+        expanded: Binding<Bool>,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
         HStack(spacing: 5) {
-            Text(title)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(Theme.textTertiary)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Theme.textGhost)
-            Spacer()
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    expanded.wrappedValue.toggle()
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Theme.textTertiary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.textGhost)
+                        .rotationEffect(.degrees(expanded.wrappedValue ? 90 : 0))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .disclosureAccessibility(expanded: expanded.wrappedValue)
+
+            trailing()
         }
         .padding(.horizontal, 8)
         .frame(height: 28)
@@ -188,6 +233,7 @@ struct SidebarView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(selected ? Theme.text : Theme.textSecondary)
                 Spacer()
+                SpaceAttentionGlyph(attention: model.scopeAttention)
                 Text("\(model.scopeAgentCount)")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textGhost)
@@ -199,36 +245,33 @@ struct SidebarView: View {
         .buttonStyle(SidebarRowButtonStyle(selected: selected))
     }
 
-    private func agentRow(_ entry: AppModel.AgentEntry) -> some View {
-        let agent = entry.agent
-        let selected = model.selectedPane == entry.ref && model.selectedShellID == nil
+    private func terminalRow(_ entry: AppModel.TerminalEntry) -> some View {
+        let selected = !model.isFileManagerActive
+            && model.selectedPane == entry.ref
+            && model.selectedShellID == nil
         return Button {
-            model.selectedPane = entry.ref
-            model.selectedShellID = nil
+            model.selectAgent(entry.ref)
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(agent.title)
+                    Image(systemName: "terminal")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(entry.title)
                         .font(.system(size: 13.5))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    AgentStatusGlyph(status: agent.status)
                 }
                 HStack(spacing: 5) {
-                    AgentKindBadge(kind: agent.agent)
-                    Text("·")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.textGhost)
                     Image(systemName: "folder")
                         .font(.system(size: 9.5))
                         .foregroundStyle(Theme.textTertiary)
-                    Text(model.spaceName(deviceID: entry.device.id, workspaceID: agent.workspaceID))
+                    Text(model.spaceName(deviceID: entry.device.id, workspaceID: entry.pane.workspaceID))
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    trailingDetail(agent)
                     if model.showsRowDeviceBadges {
                         deviceBadge(entry.device)
                     }
@@ -242,8 +285,10 @@ struct SidebarView: View {
         .buttonStyle(SidebarRowButtonStyle(selected: selected))
     }
 
+    /// App-owned standalone shell (local login shell or plain ssh), outside
+    /// any herdr space.
     private func shellRow(_ session: ShellSession) -> some View {
-        let selected = model.selectedShellID == session.id
+        let selected = !model.isFileManagerActive && model.selectedShellID == session.id
         return Button {
             model.selectShell(session.id)
         } label: {
@@ -256,7 +301,7 @@ struct SidebarView: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Text("Local")
+                Text(session.device.name)
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textGhost)
             }
@@ -268,19 +313,112 @@ struct SidebarView: View {
         .buttonStyle(SidebarRowButtonStyle(selected: selected))
     }
 
-    /// Tinted name chip marking which device a row belongs to.
     private func deviceBadge(_ device: Device) -> some View {
         DeviceChip(device: device)
     }
 
-    @ViewBuilder
-    private func trailingDetail(_ agent: AgentInfo) -> some View {
-        if agent.status == .blocked {
-            Text("needs input")
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.warning)
+    private struct AgentRowView: View {
+    let entry: AppModel.AgentEntry
+    @ObservedObject var model: AppModel
+    @Binding var draggingAgentID: String?
+    @Binding var agentDrop: (id: String, after: Bool)?
+    @State private var hovered = false
+
+    var body: some View {
+        let agent = entry.agent
+        let selected = !model.isFileManagerActive
+            && model.selectedPane == entry.ref
+            && model.selectedShellID == nil
+        let unread = model.isUnread(entry)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(entry.title)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                AgentStatusGlyph(status: agent.status, unreadDone: unread)
+            }
+            HStack(spacing: 5) {
+                AgentKindBadge(kind: agent.agent)
+                Text("·")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textGhost)
+                Image(systemName: "folder")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Theme.textTertiary)
+                Text(model.spaceName(deviceID: entry.device.id, workspaceID: agent.workspaceID))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if agent.status == .blocked {
+                    Text("needs input")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.warning)
+                }
+                if model.showsRowDeviceBadges {
+                    DeviceChip(device: entry.device)
+                }
+            }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(height: 51)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(selected || hovered ? AnyShapeStyle(Theme.itemWashSelected) : AnyShapeStyle(.clear))
+        )
+        .onHover { hovered = $0 }
+        .opacity(draggingAgentID == entry.id ? 0.4 : 1)
+        .overlay(alignment: (agentDrop?.after ?? false) ? .bottom : .top) {
+            if agentDrop?.id == entry.id {
+                Rectangle()
+                    .fill(Theme.accent)
+                    .frame(height: 2)
+            }
+        }
+        .overlay {
+            AgentRowDragHost(
+                entryID: entry.id,
+                onClick: { model.selectAgent(entry.ref) },
+                onRename: { model.agentToRename = entry },
+                onClose: { model.requestClosePane(entry.ref, name: entry.title) },
+                onDragStart: { draggingAgentID = $0 },
+                onDragEnd: {
+                    draggingAgentID = nil
+                    agentDrop = nil
+                },
+                onDropHover: { after in agentDrop = (entry.id, after) },
+                onHoverExit: {
+                    if agentDrop?.id == entry.id { agentDrop = nil }
+                },
+                onDrop: { sourceID, after in
+                    draggingAgentID = nil
+                    agentDrop = nil
+                    guard let source = model.visibleAgents.first(where: { $0.id == sourceID })
+                    else { return }
+                    model.moveAgent(source, onto: entry, placeAfter: after)
+                }
+            )
+        }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(accessibilityLabel(unread: unread))
     }
+
+    private func accessibilityLabel(unread: Bool) -> String {
+        var parts = [entry.title]
+        switch entry.agent.status {
+        case .working: parts.append(String(localized: "Working"))
+        case .blocked: parts.append(String(localized: "Needs input"))
+        case .done where unread: parts.append(String(localized: "Unread"))
+        case .done: break
+        case .idle, .unknown: break
+        }
+        return parts.joined(separator: ", ")
+    }
+}
 
     // MARK: - Footer (device filter)
 
@@ -336,6 +474,7 @@ struct SidebarView: View {
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
+            .focusEffectDisabled()
         }
         .padding(.horizontal, 10)
         .frame(height: 40)
@@ -354,7 +493,7 @@ struct SidebarView: View {
 /// Small icon button that sits in the 28pt titlebar strip.
 struct TitlebarIconButton: View {
     let systemName: String
-    let help: String
+    let help: LocalizedStringKey
     let action: () -> Void
     @State private var hovered = false
 
@@ -371,6 +510,7 @@ struct TitlebarIconButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .onHover { hovered = $0 }
         .help(help)
     }
@@ -405,7 +545,7 @@ struct DevicePopover: View {
                         Text("All Devices")
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.text)
-                        Text("\(model.devices.count) devices · \(connectedCount) connected")
+                        Text(String(localized: "\(model.devices.count) devices · \(connectedCount) connected"))
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textTertiary)
                     }
@@ -433,11 +573,11 @@ struct DevicePopover: View {
                 }
                 .contextMenu {
                     if !device.isLocal {
-                        Button("Edit \(device.name)…") {
+                        Button(String(localized: "Edit \(device.name)…")) {
                             isPresented = false
                             model.deviceToEdit = device
                         }
-                        Button("Remove \(device.name)", role: .destructive) {
+                        Button(String(localized: "Remove \(device.name)"), role: .destructive) {
                             isPresented = false
                             model.removeDevice(device)
                         }
@@ -473,7 +613,7 @@ struct DevicePopover: View {
         }.count
     }
 
-    private func actionRow(icon: String, label: String, action: @escaping () -> Void) -> some View {
+    private func actionRow(icon: String, label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 9) {
                 Image(systemName: icon)
@@ -524,7 +664,7 @@ struct DevicePopoverRow: View {
                             .fill(dotColor)
                             .frame(width: 6, height: 6)
                     }
-                    Text(device.subtitle)
+                    Text(device.localizedSubtitle)
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
@@ -546,6 +686,16 @@ struct DevicePopoverRow: View {
                 .fill(hovered || isActive ? AnyShapeStyle(Theme.itemWashSelected) : AnyShapeStyle(.clear))
         )
         .onHover { hovered = $0 }
+    }
+}
+
+private extension View {
+    /// Button trait plus expanded/collapsed so VoiceOver matches the chevron.
+    /// macOS SwiftUI has no `accessibilityExpanded`; VoiceOver reads the value.
+    func disclosureAccessibility(expanded: Bool) -> some View {
+        self
+            .accessibilityAddTraits(.isButton)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
 
@@ -581,6 +731,7 @@ private struct SpaceRowView: View {
                 .foregroundStyle(selected ? Theme.text : Theme.textSecondary)
                 .lineLimit(1)
             Spacer()
+            SpaceAttentionGlyph(attention: model.attention(in: entry))
             if model.showsRowDeviceBadges {
                 DeviceChip(device: entry.device)
             }
@@ -630,7 +781,18 @@ private struct SpaceRowView: View {
             )
         }
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(entry.workspace.label)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        var parts = [entry.workspace.label]
+        switch model.attention(in: entry) {
+        case .blocked: parts.append(String(localized: "Needs input"))
+        case .unreadDone: parts.append(String(localized: "Unread"))
+        case .working: parts.append(String(localized: "Working"))
+        case .none: break
+        }
+        return parts.joined(separator: ", ")
     }
 }
 

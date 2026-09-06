@@ -123,9 +123,9 @@ private enum ClipboardFileError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedItem: return "Remote paste supports regular files, not folders or special files."
-        case .imageEncodingFailed: return "The clipboard image could not be encoded as PNG."
-        case .transferUnavailable: return "The remote file transfer service is unavailable."
+        case .unsupportedItem: return String(localized: "Remote paste supports regular files, not folders or special files.")
+        case .imageEncodingFailed: return String(localized: "The clipboard image could not be encoded as PNG.")
+        case .transferUnavailable: return String(localized: "The remote file transfer service is unavailable.")
         }
     }
 }
@@ -135,11 +135,33 @@ private enum ClipboardFileError: LocalizedError {
 /// Shift+Enter, so the modifier never reaches the TUI. SwiftTerm's `keyDown`
 /// and `doCommand` are public, not open, so `interpretKeyEvents` is the only
 /// hook a subclass can take — and it only sees Return in legacy mode, leaving
-/// this inert when a TUI negotiates the kitty keyboard protocol.
+/// Shift+Enter inert when a TUI negotiates the kitty keyboard protocol.
+///
+/// ⌘ text-editing chords are different. SwiftTerm hands ⌘ to AppKit
+/// `interpretKeyEvents`, and `doCommand` has no `deleteToBeginningOfLine:`, so
+/// ⌘⌫ used to send nothing. Those chords (and the matching ⌥ word-editing
+/// ones) send readline bytes here, before `super`, even under kitty — Ghostty
+/// / VS Code / iTerm Natural Text Editing, not the Shift+Enter kitty skip.
+///
+/// IME composition is the same constraint. SwiftTerm 1.19 already implements
+/// `NSTextInputClient` and draws a marked-text overlay; this subclass only
+/// keeps edit shortcuts off the PTY while `hasMarkedText()`, commits CJK as
+/// UTF-8, and re-anchors `firstRect` when a TUI has hidden the hardware caret.
 final class LineBreakTerminalView: LocalProcessTerminalView {
     var usesLightColors = false
     var appliedDarkAppearance: Bool?
     private var lightColorAdapter = LightTerminalANSIAdapter()
+
+    /// A light-mode feed can retain a partial SGR while waiting to identify a
+    /// Powerline separator. Drop that parser state when switching themes so a
+    /// later light-mode session cannot prepend stale bytes to new output.
+    func resetLightColorAdapter() {
+        lightColorAdapter = LightTerminalANSIAdapter()
+    }
+
+    /// Last non-empty caret frame, used when the TUI hides the hardware cursor
+    /// and SwiftTerm's `firstRect` would otherwise report `.zero`.
+    private var lastIMECaretFrame: NSRect = .zero
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         // SwiftTerm drops the selection on every chunk of output and on every
@@ -213,20 +235,20 @@ final class LineBreakTerminalView: LocalProcessTerminalView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         if selection.active {
-            menu.addItem(makeItem("Copy", #selector(NSText.copy(_:))))
+            menu.addItem(makeItem(String(localized: "Copy"), #selector(NSText.copy(_:))))
             if let url = Self.firstURL(in: selection.getSelectedText()) {
                 menu.addItem(.separator())
-                let open = makeItem("Open Link", #selector(openLinkFromMenu(_:)))
+                let open = makeItem(String(localized: "Open Link"), #selector(openLinkFromMenu(_:)))
                 open.representedObject = url
                 menu.addItem(open)
-                let copyLink = makeItem("Copy Link Address", #selector(copyLinkFromMenu(_:)))
+                let copyLink = makeItem(String(localized: "Copy Link Address"), #selector(copyLinkFromMenu(_:)))
                 copyLink.representedObject = url
                 menu.addItem(copyLink)
             }
             menu.addItem(.separator())
         }
-        menu.addItem(makeItem("Paste", #selector(NSText.paste(_:))))
-        menu.addItem(makeItem("Select All", #selector(NSText.selectAll(_:))))
+        menu.addItem(makeItem(String(localized: "Paste"), #selector(NSText.paste(_:))))
+        menu.addItem(makeItem(String(localized: "Select All"), #selector(NSText.selectAll(_:))))
         return menu
     }
 
@@ -258,19 +280,166 @@ final class LineBreakTerminalView: LocalProcessTerminalView {
     }
 
     override func interpretKeyEvents(_ eventArray: [NSEvent]) {
+        if hasMarkedText() {
+            // SwiftTerm's `doCommand` still emits PTY sequences for copy/select/
+            // emacs-style motion. Command/Control shortcuts must stay with the
+            // IME until composition ends; other keys still reach AppKit so
+            // preedit can update.
+            let forIME = eventArray.filter { !Self.isEditShortcutDuringComposition($0) }
+            if !forIME.isEmpty {
+                super.interpretKeyEvents(forIME)
+            }
+            return
+        }
         if eventArray.count == 1,
            let event = eventArray.first,
            event.type == .keyDown,
-           event.keyCode == 36 || event.keyCode == 76,  // Return, keypad Enter
-           !hasMarkedText() {
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if modifiers.contains(.shift),
-               modifiers.isDisjoint(with: [.command, .control, .option]) {
-                send(txt: "\u{1b}\r")
-                return
-            }
+           !hasMarkedText(),
+           let payload = ptyBytes(forMacEditingKey: event) {
+            send(txt: payload)
+            return
         }
         super.interpretKeyEvents(eventArray)
+    }
+
+    /// Mac Delete is Backspace (keyCode 51). ⌥⌘ arrows move split focus and
+    /// are left alone; ⌘A/⌘E/⌘W and the other app chords never match here.
+    private func ptyBytes(forMacEditingKey event: NSEvent) -> String? {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let commandOnly = modifiers.contains(.command)
+            && modifiers.isDisjoint(with: [.option, .control])
+        let optionOnly = optionAsMetaKey
+            && modifiers.contains(.option)
+            && modifiers.isDisjoint(with: [.command, .control])
+
+        if commandOnly {
+            switch event.keyCode {
+            case 51:  return "\u{15}"  // ⌘⌫ → ^U
+            case 123: return "\u{01}"  // ⌘← → ^A
+            case 124: return "\u{05}"  // ⌘→ → ^E
+            case 117: return "\u{0b}"  // ⌘⌦ → ^K
+            default: break
+            }
+        }
+        if optionOnly {
+            switch event.keyCode {
+            case 51:  return "\u{1b}\u{7f}"  // ⌥⌫ → ESC DEL
+            case 123: return "\u{1b}b"       // ⌥← → ESC b
+            case 124: return "\u{1b}f"       // ⌥→ → ESC f
+            case 117: return "\u{1b}d"       // ⌥⌦ → ESC d
+            default: break
+            }
+        }
+        if event.keyCode == 36 || event.keyCode == 76,  // Return, keypad Enter
+           modifiers.contains(.shift),
+           modifiers.isDisjoint(with: [.command, .control, .option]) {
+            return "\u{1b}\r"
+        }
+        return nil
+    }
+
+    /// Command/Control combos become `doCommand` selectors that SwiftTerm
+    /// forwards to the process. IME composition needs those keys locally.
+    private static func isEditShortcutDuringComposition(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return mods.contains(.command) || mods.contains(.control)
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        rememberIMECaretFrame()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        // IME commit must go as a complete UTF-8 string. With kitty keyboard
+        // flags on, SwiftTerm encodes a single scalar as CSI-u, which some
+        // TUIs then split. ASCII keystrokes still take the super path.
+        if hasMarkedText(), let text = Self.inputString(from: string) {
+            super.unmarkText()
+            if !text.isEmpty {
+                send(txt: text)
+            }
+            return
+        }
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    override func showCursor(source: Terminal) {
+        super.showCursor(source: source)
+        rememberIMECaretFrame()
+    }
+
+    override func hideCursor(source: Terminal) {
+        rememberIMECaretFrame()
+        super.hideCursor(source: source)
+    }
+
+    override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        let fromSuper = super.firstRect(forCharacterRange: range, actualRange: actualRange)
+        if fromSuper.width > 0.5, fromSuper.height > 0.5 {
+            rememberIMECaretFrame()
+            return fromSuper
+        }
+        let local = imeAnchorFrame()
+        guard let window else { return fromSuper }
+        return window.convertToScreen(convert(local, to: nil))
+    }
+
+    private func rememberIMECaretFrame() {
+        let frame = caretFrame
+        if frame.width > 0.5, frame.height > 0.5 {
+            lastIMECaretFrame = frame
+        }
+    }
+
+    /// Prefers the live caret, then the last frame from before the TUI hid it,
+    /// then a buffer-relative cell so IME candidates never fall back to 0,0.
+    private func imeAnchorFrame() -> NSRect {
+        let current = caretFrame
+        if current.width > 0.5, current.height > 0.5 {
+            lastIMECaretFrame = current
+            return current
+        }
+        if lastIMECaretFrame.width > 0.5, lastIMECaretFrame.height > 0.5 {
+            return lastIMECaretFrame
+        }
+        return estimatedCaretFrameFromBuffer()
+    }
+
+    private func estimatedCaretFrameFromBuffer() -> NSRect {
+        let cell = estimatedCellSize()
+        let col = min(max(0, terminal.buffer.x), max(0, terminal.cols - 1))
+        let row = min(max(0, terminal.buffer.y), max(0, terminal.rows - 1))
+        let origin = CGPoint(
+            x: CGFloat(col) * cell.width,
+            y: bounds.height - cell.height * CGFloat(row + 1)
+        )
+        return NSRect(origin: origin, size: cell)
+    }
+
+    private func estimatedCellSize() -> NSSize {
+        let rows = max(1, terminal.rows)
+        let cellHeight = max(1, getOptimalFrameSize().height / CGFloat(rows))
+        let glyph = font.glyph(withName: "W")
+        var cellWidth = font.advancement(forGlyph: glyph).width
+        if cellWidth < 1 {
+            cellWidth = ("W" as NSString).size(withAttributes: [.font: font]).width
+        }
+        return NSSize(width: max(1, cellWidth), height: cellHeight)
+    }
+
+    private static func inputString(from value: Any) -> String? {
+        switch value {
+        case let text as String:
+            return text
+        case let text as NSString:
+            return text as String
+        case let text as NSAttributedString:
+            return text.string
+        default:
+            return nil
+        }
     }
 
     var attachmentCapabilities: AgentAttachmentCapabilities?
@@ -548,10 +717,11 @@ private extension NSView {
     }
 }
 
-/// Embeds a SwiftTerm terminal running `herdr agent attach` (directly or over ssh).
+/// Embeds a SwiftTerm terminal running a direct agent or ordinary-terminal attach
+/// (locally or over SSH).
 struct AttachTerminalView: NSViewRepresentable {
     let device: Device
-    let paneID: String
+    let target: TerminalAttachTarget
     /// The device's herdr server version, so attach picks a matching CLI binary.
     var serverVersion: String?
     /// nil when the server or active manifest does not advertise attachment support.
@@ -591,7 +761,7 @@ struct AttachTerminalView: NSViewRepresentable {
 
         let service = HerdrService(device: device)
         view.attachmentService = service
-        let command = service.attachCommand(paneID: paneID, serverVersion: serverVersion)
+        let command = service.attachCommand(target: target, serverVersion: serverVersion)
         var environment = Terminal.getEnvironmentVariables(termName: "xterm-256color")
         environment.append("LANG=en_US.UTF-8")
         for (key, value) in command.environment {
@@ -711,6 +881,7 @@ func applyTerminalAppearance(
     guard let view = view as? LineBreakTerminalView,
           view.appliedDarkAppearance != dark
     else { return }
+    view.resetLightColorAdapter()
     view.appliedDarkAppearance = dark
     view.usesLightColors = !dark
     view.nativeBackgroundColor = dark ? TerminalDefaults.darkBackground : TerminalDefaults.lightBackground
@@ -719,12 +890,9 @@ func applyTerminalAppearance(
     view.needsDisplay = true
 }
 
-/// A local login shell, side by side with the agent attach — no herdr pane and no
-/// attachment paste. It does take first responder when it appears, so splitting hands the
-/// keyboard to the new shell; closing the split gives it back via `focusRemainingTerminal`.
-/// Standalone shell views stay in the hierarchy while deselected (a local shell
-/// has no server side to reattach to), so re-selecting one needs a way to hand
-/// it the keyboard again — the registry maps session ids to their live views.
+/// A standalone local or SSH login shell, or the local login shell beside an
+/// agent attach. Standalone views stay alive while deselected, so re-selecting
+/// one uses the registry to restore keyboard focus.
 @MainActor
 enum ShellViewRegistry {
     private struct WeakView { weak var view: LocalProcessTerminalView? }
@@ -749,6 +917,7 @@ enum ShellViewRegistry {
 struct ShellTerminalView: NSViewRepresentable {
     /// Session identity for the registry; nil for the ⌘D split shell.
     var sessionID: UUID?
+    var device: Device = .local
     var fontName: String = ""
     var fontSize: Double = TerminalDefaults.defaultFontSize
     var thinStrokes: Bool = true
@@ -779,11 +948,19 @@ struct ShellTerminalView: NSViewRepresentable {
             mouseReporting: mouseReporting
         )
 
+        let command = HerdrService(device: device, autoStartLocalServer: false)
+            .terminalCommand()
         var environment = Terminal.getEnvironmentVariables(termName: "xterm-256color")
         environment.append("LANG=en_US.UTF-8")
+        for (key, value) in command.environment {
+            environment.removeAll { $0.hasPrefix("\(key)=") }
+            environment.append("\(key)=\(value)")
+        }
+        context.coordinator.authorizationID = command.authorizationID
+        context.coordinator.scheduleAuthorizationCleanup()
         view.startProcess(
-            executable: "/bin/sh",
-            args: ["-c", "cd \"$HOME\"; exec \"${SHELL:-/bin/zsh}\" -l"],
+            executable: command.executable,
+            args: command.args,
             environment: environment
         )
         if let sessionID {
@@ -817,6 +994,7 @@ struct ShellTerminalView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
         coordinator.onExit = nil
+        coordinator.discardAuthorization()
         if let sessionID = coordinator.sessionID {
             ShellViewRegistry.unregister(sessionID)
         }
@@ -842,11 +1020,29 @@ struct ShellTerminalView: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         var onExit: ((Int32?) -> Void)?
         var sessionID: UUID?
+        var authorizationID: UUID?
+
+        deinit {
+            discardAuthorization()
+        }
+
+        func scheduleAuthorizationCleanup() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+                self?.discardAuthorization()
+            }
+        }
+
+        func discardAuthorization() {
+            guard let authorizationID else { return }
+            try? SSHCredentialStore.removeAuthorization(authorizationID)
+            self.authorizationID = nil
+        }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
+            discardAuthorization()
             let callback = onExit
             onExit = nil  // report once
             DispatchQueue.main.async { callback?(exitCode) }

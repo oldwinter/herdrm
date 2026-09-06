@@ -1,7 +1,7 @@
 import HerdrKit
 import SwiftUI
 
-/// Command-palette style search over agents and spaces across all devices (⌘K).
+/// Command-palette style search over agents, terminals, and spaces across all devices (⌘K).
 struct SearchSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -11,11 +11,13 @@ struct SearchSheet: View {
 
     enum Result: Identifiable {
         case agent(AppModel.AgentEntry)
+        case terminal(AppModel.TerminalEntry)
         case space(AppModel.SpaceEntry)
 
         var id: String {
             switch self {
             case .agent(let entry): return "agent-\(entry.id)"
+            case .terminal(let entry): return "terminal-\(entry.id)"
             case .space(let entry): return "space-\(entry.id)"
             }
         }
@@ -24,11 +26,16 @@ struct SearchSheet: View {
     private var results: [Result] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let agents = model.devices.flatMap { device in
-            model.session(device.id).agents.map { AppModel.AgentEntry(device: device, agent: $0) }
+            model.session(device.id).agents.map { model.agentEntry(device: device, agent: $0) }
         }.filter { entry in
             q.isEmpty
+                || entry.title.lowercased().contains(q)
                 || entry.agent.title.lowercased().contains(q)
                 || entry.agent.agent.lowercased().contains(q)
+                || (entry.agent.name?.lowercased().contains(q) ?? false)
+                || (entry.tabLabel?.lowercased().contains(q) ?? false)
+                || (entry.agent.terminalTitleStripped ?? entry.agent.terminalTitle)?
+                    .lowercased().contains(q) == true
                 || entry.device.name.lowercased().contains(q)
                 || model.spaceName(deviceID: entry.device.id, workspaceID: entry.agent.workspaceID)
                     .lowercased().contains(q)
@@ -40,15 +47,35 @@ struct SearchSheet: View {
                 || entry.workspace.label.lowercased().contains(q)
                 || entry.device.name.lowercased().contains(q)
         }
-        // Same ordering as the sidebar (AppModel.visibleAgents): whoever needs the
-        // user first, then most recently updated inside each bucket.
+        let terminals = model.devices.flatMap { model.terminalEntries(for: $0) }.filter { entry in
+            q.isEmpty
+                || entry.title.lowercased().contains(q)
+                || (entry.pane.cwd?.lowercased().contains(q) ?? false)
+                || (entry.tab?.label.lowercased().contains(q) ?? false)
+                || entry.device.name.lowercased().contains(q)
+                || model.spaceName(deviceID: entry.device.id, workspaceID: entry.pane.workspaceID)
+                    .lowercased().contains(q)
+        }
+        // Sidebar follows herdr tab order so drag-reorder sticks. ⌘K still
+        // ranks by urgency: needs input, unread, working, then the rest.
         let ranked = agents.sorted {
-            if $0.agent.status.sortBucket != $1.agent.status.sortBucket {
-                return $0.agent.status.sortBucket < $1.agent.status.sortBucket
-            }
+            let r0 = searchRank($0)
+            let r1 = searchRank($1)
+            if r0 != r1 { return r0 < r1 }
             return ($0.agent.revision ?? 0) > ($1.agent.revision ?? 0)
         }
-        return ranked.map(Result.agent) + spaces.map(Result.space)
+        return ranked.map(Result.agent) + terminals.map(Result.terminal) + spaces.map(Result.space)
+    }
+
+    private func searchRank(_ entry: AppModel.AgentEntry) -> Int {
+        switch entry.agent.status {
+        case .blocked: return 0
+        case .done where model.isUnread(entry): return 1
+        case .working: return 2
+        case .done: return 3
+        case .idle: return 4
+        case .unknown: return 5
+        }
     }
 
     var body: some View {
@@ -57,7 +84,7 @@ struct SearchSheet: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.textTertiary)
-                TextField("Search agents and spaces…", text: $query)
+                TextField("Search agents, terminals, and spaces…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .focused($fieldFocused)
@@ -129,7 +156,7 @@ struct SearchSheet: View {
         .onChange(of: query) { _, _ in highlighted = 0 }
     }
 
-    private func hint(_ key: String, _ label: String) -> some View {
+    private func hint(_ key: String, _ label: LocalizedStringKey) -> some View {
         HStack(spacing: 4) {
             Text(key)
                 .font(.system(size: 10, weight: .medium))
@@ -158,11 +185,11 @@ struct SearchSheet: View {
                         .foregroundStyle(Theme.textSecondary)
                         .frame(width: 16)
                 }
-                Text(entry.agent.title)
+                Text(entry.title)
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
-                AgentStatusGlyph(status: entry.agent.status)
+                AgentStatusGlyph(status: entry.agent.status, unreadDone: model.isUnread(entry))
                 Spacer(minLength: 8)
                 if entry.agent.status == .blocked {
                     Text("needs input")
@@ -171,6 +198,20 @@ struct SearchSheet: View {
                 }
                 trailing(
                     "\(entry.agent.agent) · \(model.spaceName(deviceID: entry.device.id, workspaceID: entry.agent.workspaceID))",
+                    device: entry.device
+                )
+            case .terminal(let entry):
+                Image(systemName: "terminal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 16)
+                Text(entry.title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                trailing(
+                    String(localized: "Terminal · \(model.spaceName(deviceID: entry.device.id, workspaceID: entry.pane.workspaceID))"),
                     device: entry.device
                 )
             case .space(let entry):
@@ -183,7 +224,7 @@ struct SearchSheet: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                trailing("Space · \(model.agentCount(in: entry)) agents", device: entry.device)
+                trailing(String(localized: "Space · \(model.agentCount(in: entry)) agents"), device: entry.device)
             }
         }
         .padding(.horizontal, 10)
@@ -216,6 +257,8 @@ struct SearchSheet: View {
     private func choose(_ result: Result) {
         switch result {
         case .agent(let entry):
+            model.reveal(entry.ref)
+        case .terminal(let entry):
             model.reveal(entry.ref)
         case .space(let entry):
             if let filter = model.deviceFilter, filter != entry.device.id {

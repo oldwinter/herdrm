@@ -1,9 +1,9 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "HerdrKit",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "HerdrKit", targets: ["HerdrKit"])
     ],

@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 
 /// Per-device facade over herdr's socket API. For SSH devices it owns the tunnel.
@@ -275,10 +276,9 @@ public actor HerdrService {
         return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
-    /// Wraps a path for the remote shell. Single quotes so nothing inside expands;
-    /// the quote dance survives sh, zsh, and fish login shells alike.
+    /// Wraps a path for the remote shell — see `ShellQuoting.quoted`.
     static func shellQuoted(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        ShellQuoting.quoted(path)
     }
 
     /// Creates a workspace (herdr "space") rooted at a directory.
@@ -300,6 +300,41 @@ public actor HerdrService {
             params: .object([
                 "workspace_id": .string(workspaceID),
                 "label": .string(label),
+            ])
+        )
+    }
+
+    /// Renames an agent (`herdr agent rename`). `target` is a pane id or current name.
+    /// Names must match `[a-z][a-z0-9_-]{0,31}` — use `renameTab` for display labels.
+    public func renameAgent(target: String, name: String) async throws {
+        _ = try await client().request(
+            method: "agent.rename",
+            params: .object([
+                "target": .string(target),
+                "name": .string(name),
+            ])
+        )
+    }
+
+    /// Renames a tab. Labels are free-form (Chinese, spaces) unlike `agent.rename`.
+    public func renameTab(tabID: String, label: String) async throws {
+        _ = try await client().request(
+            method: "tab.rename",
+            params: .object([
+                "tab_id": .string(tabID),
+                "label": .string(label),
+            ])
+        )
+    }
+
+    /// Moves a tab to `insertIndex` among tabs in its workspace (`0...count`).
+    /// Same RPC the herdr TUI uses for tab reorder.
+    public func moveTab(tabID: String, insertIndex: UInt) async throws {
+        _ = try await client().request(
+            method: "tab.move",
+            params: .object([
+                "tab_id": .string(tabID),
+                "insert_index": .number(Double(insertIndex)),
             ])
         )
     }
@@ -519,6 +554,43 @@ public actor HerdrService {
 
     // MARK: - Terminal attach
 
+    /// The command for a standalone interactive shell on this device.
+    public nonisolated func terminalCommand() -> TerminalCommand {
+        switch device.kind {
+        case .local:
+            return TerminalCommand(
+                executable: "/bin/sh",
+                args: ["-c", "cd \"$HOME\"; exec \"${SHELL:-/bin/zsh}\" -l"],
+                environment: [:],
+                authorizationID: nil
+            )
+        case .ssh(let target):
+            let authentication = SSHTunnel.authenticationConfiguration(for: device.id)
+            // Same seeding as the remote attach: SwiftTerm's child gets a sparse
+            // environment, and OpenSSH needs the user's PATH (Match exec) and
+            // SSH_AUTH_SOCK (agent identities). Authentication values win.
+            var environment = (ShellEnvironment.cached ?? .empty).launchEnvironment(binary: nil)
+            environment.merge(authentication.environment) { _, authenticationValue in
+                authenticationValue
+            }
+            environment.removeValue(forKey: "TERM")
+            environment.removeValue(forKey: "COLUMNS")
+            environment.removeValue(forKey: "LINES")
+            return TerminalCommand(
+                executable: "/usr/bin/ssh",
+                args: ["-tt"] + authentication.arguments + [
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ConnectTimeout=10",
+                    "-o", "ServerAliveInterval=15",
+                    "-o", "ServerAliveCountMax=3",
+                    SSHTunnel.sshDestination(target),
+                ],
+                environment: environment,
+                authorizationID: authentication.authorizationID
+            )
+        }
+    }
+
     /// Shell fragment that picks the herdr binary to attach with. herdr's attach
     /// stream requires the CLI and server protocol versions to match exactly, so
     /// when several herdr binaries share the PATH (a stale copy in ~/.local/bin
@@ -541,7 +613,17 @@ public actor HerdrService {
     /// `serverVersion` (from the device's last successful ping) lets the attach
     /// pick a herdr binary whose protocol matches the server's — see
     /// `attachBinarySelection`.
-    public nonisolated func attachCommand(paneID: String, serverVersion: String? = nil) -> AttachCommand {
+    public nonisolated func attachCommand(
+        target: TerminalAttachTarget,
+        serverVersion: String? = nil
+    ) -> TerminalCommand {
+        let attachArguments: String
+        switch target {
+        case .agent(let paneID):
+            attachArguments = "agent attach \(Self.shellQuoted(paneID)) --takeover"
+        case .terminal(let terminalID):
+            attachArguments = "terminal attach \(Self.shellQuoted(terminalID)) --takeover"
+        }
         switch device.kind {
         case .local:
             // Same PATH we used to discover `herdr`: login-shell snapshot, GUI
@@ -553,8 +635,8 @@ public actor HerdrService {
             environment.removeValue(forKey: "COLUMNS")
             environment.removeValue(forKey: "LINES")
             let script = "\(Self.attachBinarySelection(serverVersion: serverVersion)); "
-                + "exec \"$hb\" agent attach '\(paneID)' --takeover"
-            return AttachCommand(
+                + "exec \"$hb\" \(attachArguments)"
+            return TerminalCommand(
                 executable: "/bin/sh",
                 args: ["-c", script],
                 environment: environment,
@@ -566,10 +648,17 @@ public actor HerdrService {
             // runs in the user's login shell, and the script's sh syntax must
             // not depend on it.
             let script = "\(SSHTunnel.remotePathExport); \(Self.attachBinarySelection(serverVersion: serverVersion)); "
-                + "exec \"$hb\" agent attach '\(paneID)' --takeover"
+                + "exec \"$hb\" \(attachArguments)"
             let remote = "exec /bin/sh -c \(Self.shellQuoted(script))"
             let authentication = SSHTunnel.authenticationConfiguration(for: device.id)
-            return AttachCommand(
+            var environment = (ShellEnvironment.cached ?? .empty).launchEnvironment(binary: nil)
+            environment.merge(authentication.environment) { _, authenticationValue in
+                authenticationValue
+            }
+            environment.removeValue(forKey: "TERM")
+            environment.removeValue(forKey: "COLUMNS")
+            environment.removeValue(forKey: "LINES")
+            return TerminalCommand(
                 executable: "/usr/bin/ssh",
                 args: ["-tt"] + authentication.arguments + [
                     "-o", "StrictHostKeyChecking=accept-new",
@@ -581,17 +670,25 @@ public actor HerdrService {
                     "-o", "ServerAliveCountMax=3",
                     SSHTunnel.sshDestination(target), remote,
                 ],
-                environment: authentication.environment,
+                environment: environment,
                 authorizationID: authentication.authorizationID
             )
         }
     }
+
+    /// Compatibility convenience for agent callers.
+    public nonisolated func attachCommand(paneID: String, serverVersion: String? = nil) -> TerminalCommand {
+        attachCommand(target: .agent(paneID: paneID), serverVersion: serverVersion)
+    }
 }
 
-public struct AttachCommand: Sendable {
+public struct TerminalCommand: Sendable {
     public let executable: String
     public let args: [String]
     public let environment: [String: String]
     /// Single-use askpass grant; the caller must discard it once the process exits.
     public let authorizationID: UUID?
 }
+
+public typealias AttachCommand = TerminalCommand
+#endif  // os(macOS)

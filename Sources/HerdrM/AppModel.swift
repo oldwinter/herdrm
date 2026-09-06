@@ -44,6 +44,7 @@ struct DeviceSessionState {
     var connection: ConnectionState = .idle
     var agents: [AgentInfo] = []
     var workspaces: [WorkspaceInfo] = []
+    var tabs: [TabInfo] = []
     var panes: [PaneInfo] = []
     var agentCatalog: AgentCatalogState = .loading
     var attachmentCapabilities = AgentAttachmentCapabilityRegistry()
@@ -60,14 +61,16 @@ struct SSHAuthenticationRequest: Identifiable {
 enum SplitAxis { case vertical, horizontal }
 
 /// Identifies one of the two panes in the ⌘D split. Used for focus tracking and
-/// keyboard-driven resize; standalone `ShellSession`s are not part of this.
+/// keyboard-driven resize.
 enum SplitSide { case agent, shell }
 
-/// A standalone local shell shown as its own sidebar entry — not a herdr pane
-/// (herdr refuses to attach agent-less panes) and not the ⌘D split.
+/// A standalone local or SSH shell shown as its own sidebar entry — app-owned,
+/// outside any herdr space (unlike the persistent herdr terminals under
+/// TERMINALS) and not the ⌘D split.
 struct ShellSession: Identifiable, Equatable {
     let id: UUID
     var title: String
+    let device: Device
 }
 
 /// Per-kind CLI path overrides persisted in user defaults. Empty means automatic
@@ -113,13 +116,29 @@ final class AppModel: ObservableObject {
     private static let deviceFilterKey = "device.filter"
     @Published var sessions: [UUID: DeviceSessionState] = [:]
     @Published var selectedSpace: SpaceRef?
-    @Published var selectedPane: PaneRef?
+    @Published var selectedPane: PaneRef? {
+        didSet {
+            // Leaving a finished agent marks it viewed. Staying on it while
+            // the turn ends must not swallow the unread flag.
+            if let old = oldValue, old != selectedPane {
+                unreadAgents.remove(AgentUnreadKey(deviceID: old.deviceID, paneID: old.paneID))
+            }
+        }
+    }
+    /// Finished agents the user has not opened since they flipped to `done`.
+    @Published private(set) var unreadAgents: Set<AgentUnreadKey> = []
 
     @Published var showAddDevice = false
     @Published var showNewAgent = false
+    @Published var showNewTerminal = false
     @Published var showNewSpace = false
     @Published var showSearch = false
+    @Published var isFileManagerActive = false
     @Published var shellSplitAxis: SplitAxis?
+    /// Set by `reveal` when a jump lands while the ⌘D split is open, and consumed once the
+    /// main window is key again. Only an actual jump sets it: dismissing the search with
+    /// Escape never calls `reveal`, and the sidebar assigns `selectedPane` directly.
+    @Published var pendingSplitAgentFocus = false
     /// The pane that currently holds the keyboard within the ⌘D split. Reset to
     /// the agent side whenever the split closes so reopening it is predictable.
     @Published var activeSplitSide: SplitSide = .agent
@@ -136,7 +155,7 @@ final class AppModel: ObservableObject {
     /// Held weakly so the views are not kept alive by the model.
     weak var splitAgentView: LocalProcessTerminalView?
     weak var splitShellView: LocalProcessTerminalView?
-    /// Standalone local terminals. Their views stay alive while deselected —
+    /// Standalone terminals. Their views stay alive while deselected —
     /// unlike agents, a local shell has no server side to reattach to.
     @Published var shellSessions: [ShellSession] = []
     @Published var selectedShellID: UUID?
@@ -145,6 +164,7 @@ final class AppModel: ObservableObject {
     @Published var deviceToEdit: Device?
     @Published var sshAuthenticationRequest: SSHAuthenticationRequest?
     @Published var spaceToRename: SpaceEntry?
+    @Published var agentToRename: AgentEntry?
     /// Transient action failures: shown as an alert, never by tearing down sessions.
     @Published var actionError: String?
 
@@ -223,9 +243,84 @@ final class AppModel: ObservableObject {
     struct AgentEntry: Identifiable {
         let device: Device
         let agent: AgentInfo
+        let tabLabel: String?
 
         var id: String { "\(device.id.uuidString)-\(agent.paneID)" }
         var ref: PaneRef { PaneRef(deviceID: device.id, paneID: agent.paneID) }
+        var title: String { agent.title(tabLabel: tabLabel) }
+    }
+
+    func agentEntry(device: Device, agent: AgentInfo) -> AgentEntry {
+        AgentEntry(
+            device: device,
+            agent: agent,
+            tabLabel: session(device.id).tabs.first { $0.tabID == agent.tabID }?.customLabel
+        )
+    }
+
+    struct TerminalEntry: Identifiable {
+        let device: Device
+        let pane: PaneInfo
+        let tab: TabInfo?
+        let terminalID: String
+
+        var id: String { "\(device.id.uuidString)-\(pane.paneID)" }
+        var ref: PaneRef { PaneRef(deviceID: device.id, paneID: pane.paneID) }
+
+        var title: String {
+            if let terminalTitle = pane.terminalTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !terminalTitle.isEmpty {
+                return terminalTitle
+            }
+            if let label = tab?.customLabel {
+                return label
+            }
+            if let cwd = pane.cwd, !cwd.isEmpty {
+                let basename = URL(fileURLWithPath: cwd).lastPathComponent
+                if !basename.isEmpty { return basename }
+            }
+            return String(localized: "Terminal")
+        }
+    }
+
+    enum AttachedEntry: Identifiable {
+        case agent(AgentEntry)
+        case terminal(TerminalEntry)
+
+        var id: String {
+            switch self {
+            case .agent(let entry): return "agent-\(entry.id)"
+            case .terminal(let entry): return "terminal-\(entry.id)"
+            }
+        }
+
+        var device: Device {
+            switch self {
+            case .agent(let entry): return entry.device
+            case .terminal(let entry): return entry.device
+            }
+        }
+
+        var ref: PaneRef {
+            switch self {
+            case .agent(let entry): return entry.ref
+            case .terminal(let entry): return entry.ref
+            }
+        }
+
+        var workspaceID: String {
+            switch self {
+            case .agent(let entry): return entry.agent.workspaceID
+            case .terminal(let entry): return entry.pane.workspaceID
+            }
+        }
+
+        var attachTarget: TerminalAttachTarget {
+            switch self {
+            case .agent(let entry): return .agent(paneID: entry.agent.paneID)
+            case .terminal(let entry): return .terminal(terminalID: entry.terminalID)
+            }
+        }
     }
 
     struct SpaceEntry: Identifiable {
@@ -242,22 +337,97 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Agents across the scope, filtered by selected space, status-bucket sorted.
+    /// Agents across the scope, filtered by selected space, in herdr tab order
+    /// (device → workspace → tab number) so sidebar drag matches the TUI.
     var visibleAgents: [AgentEntry] {
         var entries = devicesInScope.flatMap { device in
-            session(device.id).agents.map { AgentEntry(device: device, agent: $0) }
+            session(device.id).agents.map { agentEntry(device: device, agent: $0) }
         }
         if let space = selectedSpace {
             entries = entries.filter {
                 $0.device.id == space.deviceID && $0.agent.workspaceID == space.workspaceID
             }
         }
-        return entries.sorted {
-            if $0.agent.status.sortBucket != $1.agent.status.sortBucket {
-                return $0.agent.status.sortBucket < $1.agent.status.sortBucket
-            }
-            return ($0.agent.revision ?? 0) > ($1.agent.revision ?? 0)
+        let deviceRank = Dictionary(uniqueKeysWithValues: devicesInScope.enumerated().map { ($1.id, $0) })
+        return entries.sorted { lhs, rhs in
+            let d0 = deviceRank[lhs.device.id] ?? Int.max
+            let d1 = deviceRank[rhs.device.id] ?? Int.max
+            if d0 != d1 { return d0 < d1 }
+            let w0 = workspaceRank(deviceID: lhs.device.id, workspaceID: lhs.agent.workspaceID)
+            let w1 = workspaceRank(deviceID: rhs.device.id, workspaceID: rhs.agent.workspaceID)
+            if w0 != w1 { return w0 < w1 }
+            return tabRank(deviceID: lhs.device.id, tabID: lhs.agent.tabID)
+                < tabRank(deviceID: rhs.device.id, tabID: rhs.agent.tabID)
         }
+    }
+
+    func terminalEntries(for device: Device) -> [TerminalEntry] {
+        let state = session(device.id)
+        let tabsByID = Dictionary(uniqueKeysWithValues: state.tabs.map { ($0.tabID, $0) })
+        return state.panes.compactMap { pane in
+            guard let terminalID = pane.terminalID else { return nil }
+            return TerminalEntry(
+                device: device,
+                pane: pane,
+                tab: pane.tabID.flatMap { tabsByID[$0] },
+                terminalID: terminalID
+            )
+        }
+    }
+
+    var visibleTerminals: [TerminalEntry] {
+        var entries = devicesInScope.flatMap { terminalEntries(for: $0) }
+        if let space = selectedSpace {
+            entries = entries.filter {
+                $0.device.id == space.deviceID && $0.pane.workspaceID == space.workspaceID
+            }
+        }
+        return entries
+    }
+
+    func isUnread(_ entry: AgentEntry) -> Bool {
+        unreadAgents.contains(AgentUnreadKey(deviceID: entry.device.id, paneID: entry.agent.paneID))
+    }
+
+    func attention(in entry: SpaceEntry) -> SpaceAttention {
+        let agents = session(entry.device.id).agents.filter {
+            $0.workspaceID == entry.workspace.workspaceID
+        }
+        return SpaceAttention.rollup(agents.map {
+            (
+                status: $0.status,
+                unreadDone: unreadAgents.contains(
+                    AgentUnreadKey(deviceID: entry.device.id, paneID: $0.paneID)
+                )
+            )
+        })
+    }
+
+    var scopeAttention: SpaceAttention {
+        SpaceAttention.rollup(devicesInScope.flatMap { device in
+            session(device.id).agents.map {
+                (
+                    status: $0.status,
+                    unreadDone: unreadAgents.contains(
+                        AgentUnreadKey(deviceID: device.id, paneID: $0.paneID)
+                    )
+                )
+            }
+        })
+    }
+
+    private func workspaceRank(deviceID: UUID, workspaceID: String) -> Int {
+        session(deviceID).workspaces.firstIndex { $0.workspaceID == workspaceID } ?? Int.max
+    }
+
+    private func tabRank(deviceID: UUID, tabID: String) -> Int {
+        session(deviceID).tabs.firstIndex { $0.tabID == tabID } ?? Int.max
+    }
+
+    private func orderedTabIDs(deviceID: UUID, workspaceID: String) -> [String] {
+        session(deviceID).tabs
+            .filter { $0.workspaceID == workspaceID }
+            .map(\.tabID)
     }
 
     var scopeAgentCount: Int {
@@ -268,7 +438,22 @@ final class AppModel: ObservableObject {
         guard let selected = selectedPane, let device = device(selected.deviceID) else { return nil }
         guard let agent = session(selected.deviceID).agents.first(where: { $0.paneID == selected.paneID })
         else { return nil }
-        return AgentEntry(device: device, agent: agent)
+        return agentEntry(device: device, agent: agent)
+    }
+
+    var selectedTerminalEntry: TerminalEntry? {
+        guard let selected = selectedPane, let device = device(selected.deviceID) else { return nil }
+        return terminalEntries(for: device).first { $0.pane.paneID == selected.paneID }
+    }
+
+    var selectedAttachedEntry: AttachedEntry? {
+        if let selectedEntry { return .agent(selectedEntry) }
+        if let selectedTerminalEntry { return .terminal(selectedTerminalEntry) }
+        return nil
+    }
+
+    private var firstVisiblePaneRef: PaneRef? {
+        visibleAgents.first?.ref ?? visibleTerminals.first?.ref
     }
 
     func agentCount(in entry: SpaceEntry) -> Int {
@@ -296,13 +481,14 @@ final class AppModel: ObservableObject {
     // MARK: - Selection
 
     func selectSpace(_ ref: SpaceRef?) {
+        isFileManagerActive = false
         selectedSpace = ref
         selectedShellID = nil
-        if let entry = selectedEntry {
+        if let entry = selectedAttachedEntry {
             if ref == nil { return }
-            if entry.device.id == ref!.deviceID && entry.agent.workspaceID == ref!.workspaceID { return }
+            if entry.device.id == ref!.deviceID && entry.workspaceID == ref!.workspaceID { return }
         }
-        selectedPane = visibleAgents.first?.ref
+        selectedPane = preferredVisibleAgent()?.ref ?? firstVisiblePaneRef
     }
 
     func setDeviceFilter(_ id: UUID?) {
@@ -310,18 +496,26 @@ final class AppModel: ObservableObject {
         if let id, let space = selectedSpace, space.deviceID != id {
             selectedSpace = nil
         }
-        if let id, let entry = selectedEntry, entry.device.id != id {
-            selectedPane = visibleAgents.first?.ref
+        if let id, let selected = selectedPane, selected.deviceID != id {
+            selectedPane = preferredVisibleAgent()?.ref ?? firstVisiblePaneRef
         }
     }
 
-    /// Set by `reveal` when a jump lands while the ⌘D split is open, and consumed once the
-    /// main window is key again. Only an actual jump sets it: dismissing the search with
-    /// Escape never calls `reveal`, and the sidebar assigns `selectedPane` directly.
-    @Published var pendingSplitAgentFocus = false
+    /// When jumping into a space, land on whoever still needs a look — not
+    /// merely the first tab.
+    private func preferredVisibleAgent() -> AgentEntry? {
+        let agents = visibleAgents
+        if let blocked = agents.first(where: { $0.agent.status == .blocked }) { return blocked }
+        if let unread = agents.first(where: { $0.agent.status == .done && isUnread($0) }) {
+            return unread
+        }
+        if let working = agents.first(where: { $0.agent.status == .working }) { return working }
+        return agents.first
+    }
 
     /// Jump target used by the search sheet and by notification clicks.
     func reveal(_ ref: PaneRef) {
+        isFileManagerActive = false
         if let filter = deviceFilter, filter != ref.deviceID {
             deviceFilter = nil
         }
@@ -342,18 +536,35 @@ final class AppModel: ObservableObject {
 
     // MARK: - Shell terminals
 
+    func openFileManager() {
+        isFileManagerActive = true
+        selectedShellID = nil
+    }
+
+    func selectAgent(_ ref: PaneRef) {
+        isFileManagerActive = false
+        selectedPane = ref
+        selectedShellID = nil
+    }
+
     var selectedShell: ShellSession? {
         selectedShellID.flatMap { id in shellSessions.first { $0.id == id } }
     }
 
     /// Every click opens another terminal, like New Agent opens another agent.
-    func newShellSession() {
-        let session = ShellSession(id: UUID(), title: "Terminal \(shellSessions.count + 1)")
+    func newShellSession(on device: Device) {
+        let n = shellSessions.count + 1
+        let session = ShellSession(
+            id: UUID(),
+            title: String(localized: "Terminal \(n)"),
+            device: device
+        )
         shellSessions.append(session)
         selectShell(session.id)
     }
 
     func selectShell(_ id: UUID) {
+        isFileManagerActive = false
         selectedShellID = id
         ShellViewRegistry.focus(id)
     }
@@ -519,7 +730,7 @@ final class AppModel: ObservableObject {
     func cancelSSHAuthentication(for request: SSHAuthenticationRequest) {
         sshAuthenticationRequest = nil
         sessions[request.deviceID]?.connection =
-            .failed("Authentication cancelled — choose Reconnect to try again")
+            .failed(String(localized: "Authentication cancelled — choose Reconnect to try again"))
     }
 
     var hasReconnectableDevice: Bool {
@@ -564,7 +775,9 @@ final class AppModel: ObservableObject {
         store.save(devices)
         if deviceFilter == device.id { deviceFilter = nil }
         if selectedSpace?.deviceID == device.id { selectedSpace = nil }
-        if selectedPane?.deviceID == device.id { selectedPane = visibleAgents.first?.ref }
+        if selectedPane?.deviceID == device.id {
+            selectedPane = preferredVisibleAgent()?.ref ?? firstVisiblePaneRef
+        }
     }
 
     // MARK: - Refresh
@@ -573,20 +786,34 @@ final class AppModel: ObservableObject {
         guard let device = device(deviceID), let service = services[deviceID] else { return }
         do {
             let snapshot = try await service.snapshot()
+            unreadAgents = AgentUnread.applying(
+                previous: previousStatuses[deviceID] ?? [:],
+                agents: snapshot.agents,
+                unread: unreadAgents,
+                deviceID: device.id
+            )
             notifyTransitions(
                 device: device,
                 from: previousStatuses[deviceID] ?? [:],
                 to: snapshot.agents,
-                workspaces: snapshot.workspaces
+                workspaces: snapshot.workspaces,
+                tabs: snapshot.tabs ?? []
             )
             previousStatuses[deviceID] = Dictionary(
                 uniqueKeysWithValues: snapshot.agents.map { ($0.paneID, $0.status) }
             )
             sessions[deviceID]?.agents = snapshot.agents
             sessions[deviceID]?.workspaces = snapshot.workspaces
-            sessions[deviceID]?.panes = snapshot.panes ?? []
+            sessions[deviceID]?.workspaces = snapshot.workspaces
+            sessions[deviceID]?.tabs = Self.orderedTabs(
+                snapshot.tabs ?? [],
+                workspaces: snapshot.workspaces
+            )
+            sessions[deviceID]?.panes = snapshot.ordinaryTerminalPanes
+            let paneIDs = Set((snapshot.panes ?? []).map(\.paneID))
+                .union(snapshot.agents.map(\.paneID))
             if let selected = selectedPane, selected.deviceID == deviceID,
-               !snapshot.agents.contains(where: { $0.paneID == selected.paneID }) {
+               !paneIDs.contains(selected.paneID) {
                 selectedPane = nil
             }
             if let space = selectedSpace, space.deviceID == deviceID,
@@ -594,7 +821,20 @@ final class AppModel: ObservableObject {
                 selectedSpace = nil
             }
             if selectedPane == nil {
-                selectedPane = visibleAgents.first?.ref
+                if let focusedPaneID = snapshot.focusedPaneID,
+                   paneIDs.contains(focusedPaneID),
+                   deviceFilter == nil || deviceFilter == deviceID {
+                    let focused = PaneRef(deviceID: deviceID, paneID: focusedPaneID)
+                    if selectedSpace == nil
+                        || selectedAttachedEntry.map({
+                            $0.ref == focused && $0.workspaceID == selectedSpace?.workspaceID
+                        }) == true {
+                        selectedPane = focused
+                    }
+                }
+                if selectedPane == nil {
+                    selectedPane = preferredVisibleAgent()?.ref ?? firstVisiblePaneRef
+                }
             }
         } catch {
             sessions[deviceID]?.connection = .failed(error.localizedDescription)
@@ -616,14 +856,17 @@ final class AppModel: ObservableObject {
         device: Device,
         from previous: [String: AgentStatus],
         to agents: [AgentInfo],
-        workspaces: [WorkspaceInfo]
+        workspaces: [WorkspaceInfo],
+        tabs: [TabInfo]
     ) {
         guard !previous.isEmpty else { return }
         for agent in agents {
             guard let old = previous[agent.paneID], old != agent.status else { continue }
             guard agent.status == .blocked || agent.status == .done else { continue }
+            let tabLabel = tabs.first { $0.tabID == agent.tabID }?.customLabel
             NotificationManager.shared.post(
                 agent: agent,
+                title: agent.title(tabLabel: tabLabel),
                 status: agent.status,
                 deviceID: device.id,
                 deviceName: device.name,
@@ -678,13 +921,13 @@ final class AppModel: ObservableObject {
         else { return error.localizedDescription }
         switch session(device.id).connection {
         case .connecting:
-            return "Still connecting to \(device.name) — try again in a moment."
+            return String(localized: "Still connecting to \(device.name) — try again in a moment.")
         case .failed(let reason):
-            return "\(device.name) is unreachable: \(reason)"
+            return String(localized: "\(device.name) is unreachable: \(reason)")
         case .idle:
-            return "\(device.name) isn't connected."
+            return String(localized: "\(device.name) isn't connected.")
         case .connected:
-            return "\(device.name) just reconnected — try again."
+            return String(localized: "\(device.name) just reconnected — try again.")
         }
     }
 
@@ -692,8 +935,8 @@ final class AppModel: ObservableObject {
 
     func requestCloseSpace(_ entry: SpaceEntry) {
         closeRequest = CloseRequest(
-            title: "Close space \"\(entry.workspace.label)\" on \(entry.device.name)?",
-            message: "All terminals and agents in this space will be closed."
+            title: String(localized: "Close space \"\(entry.workspace.label)\" on \(entry.device.name)?"),
+            message: String(localized: "All terminals and agents in this space will be closed.")
         ) { [weak self] in
             guard let self else { return }
             Task {
@@ -712,8 +955,8 @@ final class AppModel: ObservableObject {
     func requestClosePane(_ ref: PaneRef, name: String) {
         guard let device = device(ref.deviceID) else { return }
         closeRequest = CloseRequest(
-            title: "Close \"\(name)\"?",
-            message: "The pane and whatever is running inside it will be terminated."
+            title: String(localized: "Close \"\(name)\"?"),
+            message: String(localized: "The pane and whatever is running inside it will be terminated.")
         ) { [weak self] in
             guard let self else { return }
             Task {
@@ -738,6 +981,22 @@ final class AppModel: ObservableObject {
                 try await service(for: entry.device).renameWorkspace(
                     workspaceID: entry.workspace.workspaceID,
                     label: label
+                )
+                await refresh(entry.device.id)
+            } catch {
+                actionError = actionErrorMessage(error, device: entry.device)
+            }
+        }
+    }
+
+    func renameAgent(_ entry: AgentEntry, name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != entry.title else { return }
+        Task {
+            do {
+                try await service(for: entry.device).renameTab(
+                    tabID: entry.agent.tabID,
+                    label: name
                 )
                 await refresh(entry.device.id)
             } catch {
@@ -780,6 +1039,86 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Reorders an agent tab by dropping it on another agent in the same space.
+    /// Cross-space and cross-device drops are ignored (`tab.move` is in-workspace).
+    func moveAgent(_ source: AgentEntry, onto target: AgentEntry, placeAfter: Bool) {
+        guard source.device.id == target.device.id,
+              source.agent.workspaceID == target.agent.workspaceID
+        else { return }
+        let orderedIDs = orderedTabIDs(
+            deviceID: source.device.id,
+            workspaceID: source.agent.workspaceID
+        )
+        guard let insertIndex = TabReorder.insertIndex(
+            moving: source.agent.tabID,
+            onto: target.agent.tabID,
+            placeAfter: placeAfter,
+            orderedIDs: orderedIDs
+        ) else { return }
+        guard let plan = WorkspaceReorder.plan(
+            moving: source.agent.tabID,
+            onto: target.agent.tabID,
+            placeAfter: placeAfter,
+            orderedIDs: orderedIDs
+        ) else { return }
+
+        if let current = sessions[source.device.id]?.tabs {
+            let scoped = current.filter { $0.workspaceID == source.agent.workspaceID }
+            let reordered = WorkspaceReorder.applying(scoped, id: \.tabID, plan: plan)
+            sessions[source.device.id]?.tabs = Self.replacingTabs(
+                current,
+                workspaceID: source.agent.workspaceID,
+                with: reordered
+            )
+        }
+
+        Task {
+            do {
+                try await service(for: source.device).moveTab(
+                    tabID: source.agent.tabID,
+                    insertIndex: insertIndex
+                )
+                await refresh(source.device.id)
+            } catch {
+                await refresh(source.device.id)
+                actionError = actionErrorMessage(error, device: source.device)
+            }
+        }
+    }
+
+    private static func orderedTabs(_ tabs: [TabInfo], workspaces: [WorkspaceInfo]) -> [TabInfo] {
+        let wsIndex = Dictionary(uniqueKeysWithValues: workspaces.enumerated().map {
+            ($1.workspaceID, $0)
+        })
+        return tabs.sorted {
+            let w0 = wsIndex[$0.workspaceID] ?? Int.max
+            let w1 = wsIndex[$1.workspaceID] ?? Int.max
+            if w0 != w1 { return w0 < w1 }
+            return ($0.number ?? Int.max) < ($1.number ?? Int.max)
+        }
+    }
+
+    private static func replacingTabs(
+        _ tabs: [TabInfo],
+        workspaceID: String,
+        with reordered: [TabInfo]
+    ) -> [TabInfo] {
+        var result: [TabInfo] = []
+        var inserted = false
+        for tab in tabs {
+            if tab.workspaceID == workspaceID {
+                if !inserted {
+                    result.append(contentsOf: reordered)
+                    inserted = true
+                }
+            } else {
+                result.append(tab)
+            }
+        }
+        if !inserted { result.append(contentsOf: reordered) }
+        return result
+    }
+
     /// Creates a workspace rooted at the given directory ("~" expands to the device's
     /// home, local or remote), then goes straight into the New Agent sheet for it.
     func createNewSpace(device: Device, directory: String, label: String?) {
@@ -799,6 +1138,28 @@ final class AppModel: ObservableObject {
                 await refresh(device.id)
                 selectedSpace = SpaceRef(deviceID: device.id, workspaceID: created.workspaceID)
                 showNewAgent = true
+            } catch {
+                actionError = actionErrorMessage(error, device: device)
+            }
+        }
+    }
+
+    /// Creates a persistent shell tab on the selected Herdr device. Local and
+    /// remote terminals use the same server-owned lifecycle and can be detached
+    /// and reattached without killing the shell process.
+    func startNewTerminal(device: Device, workspaceID: String) {
+        Task {
+            do {
+                let paneID = try await service(for: device).createTab(
+                    workspaceID: workspaceID,
+                    cwd: nil,
+                    label: nil
+                )
+                await refresh(device.id)
+                isFileManagerActive = false
+                selectedSpace = SpaceRef(deviceID: device.id, workspaceID: workspaceID)
+                selectedPane = PaneRef(deviceID: device.id, paneID: paneID)
+                selectedShellID = nil
             } catch {
                 actionError = actionErrorMessage(error, device: device)
             }
@@ -840,6 +1201,7 @@ final class AppModel: ObservableObject {
                     )
                 }
                 await refresh(device.id)
+                isFileManagerActive = false
                 selectedPane = PaneRef(deviceID: device.id, paneID: pane)
             } catch {
                 if let createdPane {

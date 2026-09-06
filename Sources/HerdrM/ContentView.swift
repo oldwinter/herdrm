@@ -56,8 +56,10 @@ struct RootView: View {
         .onAppear { model.start() }
         .sheet(isPresented: $model.showAddDevice) { AddDeviceSheet(model: model) }
         .sheet(isPresented: $model.showNewAgent) { NewAgentSheet(model: model) }
+        .sheet(isPresented: $model.showNewTerminal) { NewTerminalSheet(model: model) }
         .sheet(isPresented: $model.showNewSpace) { NewSpaceSheet(model: model) }
         .sheet(item: $model.spaceToRename) { entry in RenameSpaceSheet(model: model, entry: entry) }
+        .sheet(item: $model.agentToRename) { entry in RenameAgentSheet(model: model, entry: entry) }
         .sheet(item: $model.deviceToEdit) { device in EditDeviceSheet(model: model, device: device) }
         .sheet(item: $model.sshAuthenticationRequest) { request in
             SSHAuthenticationSheet(model: model, request: request)
@@ -100,6 +102,7 @@ enum TitlebarMetrics {
 struct DetailView: View {
     @ObservedObject var model: AppModel
     @Binding var sidebarCollapsed: Bool
+    @State private var hasOpenedFileManager = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -107,8 +110,7 @@ struct DetailView: View {
                 .background(Theme.contentBackground)
                 .zIndex(1)
             Rectangle().fill(Theme.hairline).frame(height: 1)
-            terminal
-                .clipped()
+            detailContent
                 // Losing the selected agent tears the SplitContainer down without
                 // resetting the axis, which would leave the same phantom split.
                 //
@@ -118,12 +120,32 @@ struct DetailView: View {
                 // on teardown. Remove this and "split open with no agent selected"
                 // becomes reachable, which is a state a deferred focus request can be
                 // armed into with nothing left in the tree to consume it.
-                .onChange(of: model.selectedEntry?.id) { _, id in
+                .onChange(of: model.selectedAttachedEntry?.id) { _, id in
                     if id == nil { model.shellSplitAxis = nil }
+                }
+                .onChange(of: model.isFileManagerActive) { _, active in
+                    if active { hasOpenedFileManager = true }
                 }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.contentBackground.ignoresSafeArea())
+    }
+
+    private var detailContent: some View {
+        ZStack {
+            terminal
+                .clipped()
+                .opacity(model.isFileManagerActive ? 0 : 1)
+                .allowsHitTesting(!model.isFileManagerActive)
+            if hasOpenedFileManager {
+                DeviceFilesView(model: model)
+                    .opacity(model.isFileManagerActive ? 1 : 0)
+                    .allowsHitTesting(model.isFileManagerActive)
+            }
+        }
+        .onAppear {
+            if model.isFileManagerActive { hasOpenedFileManager = true }
+        }
     }
 
     // MARK: - Titlebar strip (28pt, traditional)
@@ -136,41 +158,70 @@ struct DetailView: View {
                     sidebarCollapsed = false
                 }
             }
-            if let shell = model.selectedShell {
+            if model.isFileManagerActive {
+                Image(systemName: "folder")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+                Text("Files")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+            } else if let shell = model.selectedShell {
                 Image(systemName: "terminal")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.textTertiary)
                 Text(shell.title)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.text)
-                Text("Local")
+                Text(shell.device.name)
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.textTertiary)
                 Spacer()
-            } else if let entry = model.selectedEntry {
-                let agent = entry.agent
-                statusGlyph(agent.status)
-                Text(agent.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                    .help((agent.cwd as NSString?)?.abbreviatingWithTildeInPath ?? "")
-                Spacer(minLength: 12)
-                AgentKindBadge(kind: agent.agent)
-                Text("·")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textGhost)
-                Text(model.spaceName(deviceID: entry.device.id, workspaceID: agent.workspaceID))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textTertiary)
-                    .lineLimit(1)
-                if model.showsRowDeviceBadges {
-                    DeviceChip(device: entry.device)
+            } else if let attached = model.selectedAttachedEntry {
+                switch attached {
+                case .agent(let entry):
+                    let agent = entry.agent
+                    statusGlyph(agent.status)
+                    Text(entry.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                        .help((agent.cwd as NSString?)?.abbreviatingWithTildeInPath ?? "")
+                    Spacer(minLength: 12)
+                    AgentKindBadge(kind: agent.agent)
+                    Text("\u{b7}")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textGhost)
+                    Text(model.spaceName(deviceID: entry.device.id, workspaceID: agent.workspaceID))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                    if model.showsRowDeviceBadges {
+                        DeviceChip(device: entry.device)
+                    }
+                    statusPill(agent.status)
+                case .terminal(let entry):
+                    Image(systemName: "terminal")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(entry.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                        .help((entry.pane.cwd as NSString?)?.abbreviatingWithTildeInPath ?? "")
+                    Spacer(minLength: 12)
+                    Text(model.spaceName(deviceID: entry.device.id, workspaceID: entry.pane.workspaceID))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                    if model.showsRowDeviceBadges {
+                        DeviceChip(device: entry.device)
+                    }
                 }
-                statusPill(agent.status)
             } else {
-                Text("No agent selected")
+                Text("No terminal selected")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.textTertiary)
                 Spacer()
@@ -191,11 +242,9 @@ struct DetailView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.warning)
         case .done:
-            Image(systemName: "checkmark")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Theme.success)
+            EmptyView()
         case .idle, .unknown:
-            Circle().fill(Theme.textGhost).frame(width: 7, height: 7)
+            EmptyView()
         }
     }
 
@@ -203,9 +252,9 @@ struct DetailView: View {
     private func statusPill(_ status: AgentStatus) -> some View {
         let label: String? = {
             switch status {
-            case .working: return "Working"
-            case .blocked: return "Needs input"
-            case .done: return "Done"
+            case .working: return String(localized: "Working")
+            case .blocked: return String(localized: "Needs input")
+            case .done: return String(localized: "Done")
             case .idle, .unknown: return nil
             }
         }()
@@ -239,13 +288,14 @@ struct DetailView: View {
     @ViewBuilder
     private var terminal: some View {
         ZStack {
-            agentTerminal
+            attachedTerminal
             // Standalone shells stay in the hierarchy while deselected: unlike a
-            // herdr pane, a local shell has no server side to reattach to, so
-            // tearing the view down would kill whatever is running in it.
+            // herdr pane, an app-owned shell has no server side to reattach to,
+            // so tearing the view down would kill whatever is running in it.
             ForEach(model.shellSessions) { session in
                 ShellTerminalView(
                     sessionID: session.id,
+                    device: session.device,
                     fontName: terminalFontName,
                     fontSize: terminalFontSize,
                     thinStrokes: terminalThinStrokes,
@@ -266,8 +316,15 @@ struct DetailView: View {
     }
 
     @ViewBuilder
-    private var agentTerminal: some View {
-        if let entry = model.selectedEntry {
+    private var attachedTerminal: some View {
+        if let entry = model.selectedAttachedEntry {
+            let attachmentCapabilities: AgentAttachmentCapabilities? = {
+                guard case .agent(let agentEntry) = entry else { return nil }
+                return model.attachmentCapabilities(
+                    deviceID: agentEntry.device.id,
+                    agentKind: agentEntry.agent.agentKindRaw
+                )
+            }()
             SplitContainer(
                 axis: model.shellSplitAxis,
                 activeSide: model.activeSplitSide,
@@ -276,12 +333,9 @@ struct DetailView: View {
                 ZStack {
                     AttachTerminalView(
                         device: entry.device,
-                        paneID: entry.agent.paneID,
+                        target: entry.attachTarget,
                         serverVersion: model.serverVersion(deviceID: entry.device.id),
-                        attachmentCapabilities: model.attachmentCapabilities(
-                            deviceID: entry.device.id,
-                            agentKind: entry.agent.agentKindRaw
-                        ),
+                        attachmentCapabilities: attachmentCapabilities,
                         fontName: terminalFontName,
                         fontSize: terminalFontSize,
                         thinStrokes: terminalThinStrokes,
@@ -350,7 +404,7 @@ struct DetailView: View {
             // that follows the sheet's responder restore. Filtered to the terminal's own
             // window and consumed no matter which window it was, so a pending request can
             // never survive to a later, unrelated activation — coming back from ⌘Tab or
-            // closing Settings would otherwise yank the keyboard into a live agent.
+            // closing Settings would otherwise yank the keyboard into a live pane.
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
                 guard model.pendingSplitAgentFocus else { return }
                 model.pendingSplitAgentFocus = false
@@ -371,7 +425,7 @@ struct DetailView: View {
             }
         } else {
             // The .onReceive below only exists on the branch above, so a request armed
-            // while no agent is selected would have no consumer and would be cashed in by
+            // while no pane is selected would have no consumer and would be cashed in by
             // some later activation. Revealing a pane that has since gone away lands here.
             VStack(spacing: 10) {
                 Image(systemName: "terminal")
@@ -400,18 +454,18 @@ struct DetailView: View {
 
     /// ssh exits 255 for transport failures; everything else is the far end closing
     /// (takeover by another client, the pane going away, herdr stopping).
-    private func attachEndedOverlay(_ entry: AppModel.AgentEntry) -> some View {
+    private func attachEndedOverlay(_ entry: AppModel.AttachedEntry) -> some View {
         let dropped = endedAttachCode == 255
         return VStack(spacing: 10) {
             Image(systemName: dropped ? "bolt.horizontal.circle" : "rectangle.slash")
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(Theme.textGhost)
-            Text(dropped ? "Connection to \(entry.device.name) dropped" : "Terminal session ended")
+            Text(dropped ? String(localized: "Connection to \(entry.device.name) dropped") : String(localized: "Terminal session ended"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Theme.text)
             Text(dropped
-                ? "The SSH connection behind this terminal went away."
-                : "Another client took this pane over, or the attach closed.")
+                ? String(localized: "The SSH connection behind this terminal went away.")
+                : String(localized: "Another client took this pane over, or the attach closed."))
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.textTertiary)
             Button("Reconnect") {
@@ -446,13 +500,15 @@ struct DetailView: View {
 
     private var placeholderText: String {
         switch model.connection {
-        case .connecting: return "Connecting…"
+        case .connecting: return String(localized: "Connecting…")
         case .failed(let reason): return reason
         default:
-            if model.selectedSpace != nil && model.visibleAgents.isEmpty {
-                return "No agents in this space yet"
+            if model.selectedSpace != nil
+                && model.visibleAgents.isEmpty
+                && model.visibleTerminals.isEmpty {
+                return String(localized: "No agents or terminals in this space yet")
             }
-            return "Select an agent, or start a new one"
+            return String(localized: "Select an agent or terminal, or start a new one")
         }
     }
 
@@ -468,8 +524,8 @@ struct AddDeviceSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "desktopcomputer",
-                title: "Add Device",
-                subtitle: "Uses OpenSSH config, agent, Tailscale SSH, or password"
+                title: String(localized: "Add Device"),
+                subtitle: String(localized: "Uses OpenSSH config, agent, Tailscale SSH, or password")
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
@@ -524,7 +580,7 @@ struct SSHAuthenticationSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "key.fill",
-                title: "SSH Authentication",
+                title: String(localized: "SSH Authentication"),
                 subtitle: request.target
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -534,7 +590,7 @@ struct SSHAuthenticationSheet: View {
                 SecureField("SSH password", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .focused($passwordFocused)
-                Label(SSHCredentialStore.persistenceDescription, systemImage: "lock.fill")
+                Label(String(localized: "Saved in your macOS login Keychain"), systemImage: "lock.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textTertiary)
             }
@@ -592,9 +648,9 @@ struct SheetHeader: View {
 }
 
 struct SheetSectionLabel: View {
-    let text: String
+    let text: LocalizedStringKey
 
-    init(_ text: String) { self.text = text }
+    init(_ text: LocalizedStringKey) { self.text = text }
 
     var body: some View {
         Text(text)
@@ -620,8 +676,8 @@ struct NewSpaceSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "folder.badge.plus",
-                title: "New Space",
-                subtitle: "A herdr workspace rooted at a project directory on \(chosenDevice.name)"
+                title: String(localized: "New Space"),
+                subtitle: String(localized: "A herdr workspace rooted at a project directory on \(chosenDevice.name)")
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
@@ -642,7 +698,7 @@ struct NewSpaceSheet: View {
                 SheetSectionLabel("DIRECTORY")
                 DirectoryPickerField(model: model, device: chosenDevice, path: $directory)
                 if !chosenDevice.isLocal {
-                    Text("Path on \(chosenDevice.name); ~ expands to its home directory")
+                    Text(String(localized: "Path on \(chosenDevice.name); ~ expands to its home directory"))
                         .font(.system(size: 10.5))
                         .foregroundStyle(Theme.textTertiary)
                 }
@@ -780,7 +836,7 @@ struct DirectoryPickerField: View {
                     }
                 }
                 if visibleEntries.isEmpty && !isListing {
-                    Text(entries.isEmpty ? "No subfolders" : "No folders match \"\(filter)\"")
+                    Text(entries.isEmpty ? String(localized: "No subfolders") : String(localized: "No folders match \"\(filter)\""))
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.textGhost)
                         .padding(8)
@@ -869,6 +925,121 @@ struct DirectoryPickerField: View {
     }
 }
 
+struct NewTerminalSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var deviceID = Device.local.id
+    @State private var workspaceID = ""
+
+    private var chosenDevice: Device {
+        model.device(deviceID) ?? .local
+    }
+
+    private var spaces: [WorkspaceInfo] {
+        model.session(deviceID).workspaces
+    }
+
+    private var isStandalone: Bool { workspaceID.isEmpty }
+
+    private var spaceLabel: String {
+        spaces.first { $0.workspaceID == workspaceID }?.label ?? String(localized: "a Herdr space")
+    }
+
+    private var subtitle: String {
+        if isStandalone {
+            return chosenDevice.isLocal
+                ? String(localized: "Start a login shell on this Mac")
+                : String(localized: "Connect to \(chosenDevice.name) over SSH")
+        }
+        return String(localized: "Creates a persistent shell in \(spaceLabel) on \(chosenDevice.name)")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(
+                systemImage: "terminal",
+                title: String(localized: "New Terminal"),
+                subtitle: subtitle
+            )
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 8) {
+                if model.showsDeviceBadges {
+                    SheetSectionLabel("DEVICE")
+                    Picker("", selection: $deviceID) {
+                        ForEach(model.devices) { device in
+                            Text(device.name).tag(device.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .onChange(of: deviceID) { _, _ in
+                        workspaceID = spaces.first?.workspaceID ?? ""
+                    }
+
+                    Spacer().frame(height: 8)
+                }
+
+                SheetSectionLabel("SPACE")
+                // A herdr space gives a persistent, reattachable server-owned
+                // shell; Standalone is an app-owned process (plain login shell
+                // or ssh) that needs no herdr on the device at all.
+                Picker("", selection: $workspaceID) {
+                    ForEach(spaces) { workspace in
+                        Text(workspace.label).tag(workspace.workspaceID)
+                    }
+                    Text("Standalone (not in a space)").tag("")
+                }
+                .labelsHidden()
+                .fixedSize()
+                if isStandalone {
+                    Text("Runs in this app only; closing herdrm ends the shell.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .padding(16)
+
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Open Terminal") {
+                    if isStandalone {
+                        model.newShellSession(on: chosenDevice)
+                    } else {
+                        model.startNewTerminal(device: chosenDevice, workspaceID: workspaceID)
+                    }
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .frame(width: 420)
+        .onAppear {
+            deviceID = model.selectedSpace?.deviceID
+                ?? model.selectedAttachedEntry?.device.id
+                ?? model.deviceFilter
+                ?? model.devices.first?.id
+                ?? Device.local.id
+            let preferredSpace = model.selectedSpace?.deviceID == deviceID
+                ? model.selectedSpace?.workspaceID
+                : model.selectedAttachedEntry.flatMap {
+                    $0.device.id == deviceID ? $0.workspaceID : nil
+                }
+            workspaceID = preferredSpace.flatMap { preferred in
+                spaces.contains { $0.workspaceID == preferred } ? preferred : nil
+            } ?? spaces.first?.workspaceID ?? ""
+        }
+    }
+}
+
 struct NewAgentSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -894,7 +1065,7 @@ struct NewAgentSheet: View {
     }
 
     private var spaceLabel: String {
-        if workspaceID.isEmpty { return "the focused space" }
+        if workspaceID.isEmpty { return String(localized: "the focused space") }
         return session.workspaces.first { $0.workspaceID == workspaceID }?.label ?? workspaceID
     }
 
@@ -902,8 +1073,8 @@ struct NewAgentSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "sparkles",
-                title: "New Agent",
-                subtitle: "Starts in \(spaceLabel), attached to its live terminal"
+                title: String(localized: "New Agent"),
+                subtitle: String(localized: "Starts in \(spaceLabel), attached to its live terminal")
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
@@ -931,15 +1102,15 @@ struct NewAgentSheet: View {
                     case .loading:
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("Checking agents on \(chosenDevice.name)…")
+                            Text(String(localized: "Checking agents on \(chosenDevice.name)…"))
                                 .foregroundStyle(Theme.textSecondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
                     case .failed(let message):
                         VStack(alignment: .leading, spacing: 8) {
                             Text(chosenDevice.isLocal
-                                ? "Couldn’t check installed agent CLIs."
-                                : "Couldn’t load this server’s agent catalog.")
+                                ? String(localized: "Couldn’t check installed agent CLIs.")
+                                : String(localized: "Couldn’t load this server’s agent catalog."))
                                 .foregroundStyle(Theme.textSecondary)
                             Text(message)
                                 .font(.system(size: 10.5))
@@ -951,8 +1122,8 @@ struct NewAgentSheet: View {
                         .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
                     case .loaded(let loadedKinds, _) where loadedKinds.isEmpty:
                         Text(chosenDevice.isLocal
-                            ? "No supported agent CLI was found on this Mac. Install one, or set a binary path in Settings → Agents."
-                            : "This server advertises no agent manifests.")
+                            ? String(localized: "No supported agent CLI was found on this Mac. Install one, or set a binary path in Settings → Agents.")
+                            : String(localized: "This server advertises no agent manifests."))
                             .foregroundStyle(Theme.textSecondary)
                             .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
                     case .loaded(let loadedKinds, let paths):
@@ -1094,8 +1265,8 @@ struct RenameSpaceSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "pencil",
-                title: "Rename Space",
-                subtitle: "Rename \(entry.workspace.label) on \(entry.device.name)"
+                title: String(localized: "Rename Space"),
+                subtitle: String(localized: "Rename \(entry.workspace.label) on \(entry.device.name)")
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
 
@@ -1129,6 +1300,58 @@ struct RenameSpaceSheet: View {
     }
 }
 
+struct RenameAgentSheet: View {
+    @ObservedObject var model: AppModel
+    let entry: AppModel.AgentEntry
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SheetHeader(
+                systemImage: "pencil",
+                title: String(localized: "Rename Agent"),
+                subtitle: String(localized: "Rename \(entry.title) on \(entry.device.name)")
+            )
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 8) {
+                SheetSectionLabel("NAME")
+                TextField("Agent name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                Text("Chinese, spaces, and punctuation are allowed.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(16)
+
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") {
+                    model.renameAgent(entry, name: name)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedName.isEmpty || trimmedName == entry.title)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .frame(width: 400)
+        .onAppear { name = entry.title }
+    }
+}
+
 struct EditDeviceSheet: View {
     @ObservedObject var model: AppModel
     let device: Device
@@ -1140,8 +1363,8 @@ struct EditDeviceSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(
                 systemImage: "pencil",
-                title: "Edit Device",
-                subtitle: "Changing the SSH target reconnects the device"
+                title: String(localized: "Edit Device"),
+                subtitle: String(localized: "Changing the SSH target reconnects the device")
             )
             Rectangle().fill(Theme.hairline).frame(height: 1)
 

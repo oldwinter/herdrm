@@ -5,7 +5,112 @@ on [Keep a Changelog](https://keepachangelog.com); versions follow semver.
 Release automation extracts the matching section for GitHub release notes and
 the Sparkle update description — a release without a section here fails CI.
 
-## [Unreleased]
+## [0.5.3] - 2026-08-29
+
+### Added
+- Pasting images and files into an attached terminal now works for Cursor,
+  Gemini, Grok, OpenCode, and pi, alongside the existing Claude Code, Codex,
+  and Copilot support. On a local device an image on the clipboard forwards
+  Ctrl+V so the agent attaches the pixels itself; on an SSH device the image
+  or file is staged on that host and its path is pasted. (#61, thanks
+  @ljxw88!)
+- Settings → Agents can now override the binary path for pi. (#61, thanks
+  @ljxw88!)
+- Sidebar Spaces and Agents share one set of conversation marks: a spinner
+  while running, a filled unread dot after a finish you have not opened,
+  nothing once viewed, and an exclamation if the agent needs input. A space
+  shows the strongest state among its agents. (#60, thanks @JackieJam!)
+- Agents in the sidebar can be drag-reordered. The drop calls herdr's
+  `tab.move` (same RPC the TUI uses) so the order is the session's, not just
+  this window. Cross-space drops are ignored. ⌘K still ranks by urgency.
+  (#60, thanks @JackieJam!)
+
+### Fixed
+- Kimi and pi rows show their bundled brand icon instead of no icon at all —
+  both marks shipped in the app but were missing from the icon lookup. Kinds
+  that only match a prefix ("claude-code-next") now resolve to the longest
+  matching mark rather than an arbitrary one, and only on a `-` boundary so a
+  two-letter kind like `pi` can't claim an unrelated name such as `pilot`.
+  (#61, thanks @ljxw88!)
+- Powerline prompt separators render correctly in light mode: a separator's
+  foreground is the neighboring segment's background, so the adapter now
+  applies the background transform to it instead of the text-contrast
+  transform that made joins look dark and blended. (#63, #64, thanks
+  @hualinli!)
+
+## [0.5.2] - 2026-08-28
+
+### Added
+- Bare herdr shell panes now appear under TERMINALS alongside agents and can
+  be attached on local or SSH devices (`herdr terminal attach`). **New
+  Terminal** (⌘T) creates a persistent shell tab in a chosen device and space.
+  (#57, #58, thanks @forcey!)
+- Standalone terminals — app-owned shells outside any herdr space — can now
+  connect to any configured device over SSH as well as opening a local login
+  shell, reusing the device's OpenSSH config, agent, host-key, and Keychain
+  password flow. Pick "Standalone" in the New Terminal sheet. (#54, thanks
+  @ljxw88!)
+- A two-pane Files workspace browses local and SSH-device files and copies
+  regular files in either direction with progress, cancellation, atomic
+  staging, and Replace / Keep Both conflict handling. (#55, thanks @ljxw88!)
+
+### Fixed
+- Rename Agent now sets the herdr tab label (`tab.rename`) instead of
+  `agent.rename`. Tab labels accept Chinese, spaces, and punctuation; agent
+  identifiers do not (`[a-z][a-z0-9_-]{0,31}`). The sidebar shows that label.
+  (#59, thanks @JackieJam!)
+- Remote terminal attaches now inherit the captured shell environment, so
+  OpenSSH keeps the user's `PATH` and `SSH_AUTH_SOCK` when evaluating SSH
+  configuration and agent-backed identities. (#56, thanks @OnkayC!)
+
+## [0.5.1] - 2026-08-27
+
+### Added
+- Agents can be renamed from the sidebar context menu (`agent.rename`). The
+  row then shows that name instead of a stale terminal title. (#53, thanks
+  @JackieJam!)
+
+### Fixed
+- Sidebar agent rows no longer treat a terminal OSC title as the display name
+  when it is just the agent kind or the project folder. Cursor / OpenCode
+  conversation titles still win when the herdr name is auto-generated; Agy
+  and Codex fall through to the herdr name so a rename is visible. (#53,
+  thanks @JackieJam!)
+- Pasting a copied image file into a local agent behaves like pasting a
+  screenshot again: agents that read clipboard images natively (Claude Code,
+  Codex, Copilot) get the paste shortcut and show their [Image #1]-style
+  attachment, instead of a shell-quoted file path. 0.3.9's agent-aware paste
+  had routed every copied file — image or not — through the path paste;
+  non-image files keep it, and remote devices still upload and paste the
+  remote path.
+
+## [0.5.0] - 2026-08-27
+
+### Added
+- Simplified Chinese localization via an Apple String Catalog, with Settings →
+  Appearance offering Follow System / English / Simplified Chinese (restart to
+  apply). (#46, #52, thanks @eachann1024!)
+
+### Fixed
+- ⌘⌫ in the terminal now deletes to the start of the line (^U). ⌘← / ⌘→ jump
+  to start / end (^A / ^E) and ⌘⌦ deletes to the end (^K), with the matching ⌥
+  word-editing chords; the same chords still send those readline bytes when a
+  TUI has negotiated the kitty keyboard protocol. zsh's default ^U is
+  kill-whole-line — that binding lives in the shell, not the terminal. (#49,
+  thanks @eachann1024!)
+- Sidebar section headers (Spaces, Agents, Terminals) now collapse on click,
+  and chrome buttons no longer keep a focus ring after click. (#48, #50,
+  thanks @eachann1024!)
+- CJK IME composition in the embedded terminal keeps preedit visible, holds
+  the candidate window at the caret, and does not forward edit shortcuts to
+  the PTY. (#47, #51, thanks @eachann1024!)
+- The app icon renders with proper rounded corners and margins in the Dock and
+  ⌘Tab on macOS 15 and earlier — releases now compile the Icon Composer icon
+  so down-level variants are generated instead of the full-bleed square. (#44,
+  thanks @hualinli!)
+- A write to a peer-closed herdr socket can no longer take the whole app down
+  with SIGPIPE — connections opt out of the signal and the reconnect path
+  handles the error instead. (#45, thanks @csorodrigo!)
 
 ### Added
 - Documented the proposed AI agent control plane: a JSON-first `herdrmctl`,

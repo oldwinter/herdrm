@@ -13,7 +13,7 @@ public enum AgentAttachmentPathSyntax: String, Decodable, Sendable, Equatable {
     public func format(_ path: String) -> String {
         switch self {
         case .shellQuoted:
-            return HerdrService.shellQuoted(path)
+            return ShellQuoting.quoted(path)
         }
     }
 }
@@ -108,14 +108,30 @@ public struct AgentAttachmentCapabilityRegistry: Sendable, Equatable {
         agentKind.lowercased().replacingOccurrences(of: "_", with: "-")
     }
 
-    /// Compatibility for Herdr servers predating manifest capabilities. Once
-    /// any manifest advertises capabilities, the server becomes authoritative.
+    /// Compatibility for Herdr servers predating manifest capabilities — which
+    /// is every release through 0.8.2, so today this table is what actually
+    /// applies. Once any manifest advertises capabilities, the server becomes
+    /// authoritative. Alias spellings mirror the `aliases` in herdr's
+    /// agent-detection manifests; herdr reports the manifest id as a pane's
+    /// agent kind, so the aliases are only defensive.
+    ///
+    /// Every kind listed binds Ctrl+V to a clipboard read that attaches image
+    /// pixels (each shells out to `osascript` for `«class PNGf»` on macOS), and
+    /// resolves a pasted path — Claude, Codex, Cursor, Gemini and OpenCode
+    /// attach it in the composer, while Copilot, Grok and pi leave it as text
+    /// for a file-read tool that returns images as vision input. Kinds whose
+    /// handling is unverified stay out of the table and paste as plain text.
     private static let legacyFallbacks: [([String], AgentAttachmentCapabilities)] = [
         (
             [
                 "claude", "claude-code",
                 "codex", "codex-cli", "openai-codex",
                 "copilot", "github-copilot", "ghcs",
+                "cursor", "cursor-agent",
+                "gemini",
+                "grok", "grok-build",
+                "opencode", "open-code",
+                "pi",
             ],
             AgentAttachmentCapabilities(
                 nativeClipboardImageData: true,
@@ -151,6 +167,12 @@ public enum AgentAttachmentDeliveryPolicy {
             return capabilities.imagePath.map(AgentAttachmentDeliveryAction.devicePaths)
                 ?? .unsupported
         case .files(allImages: true):
+            // A copied image file is still an image: a local agent that reads
+            // clipboard images natively (Claude Code's [Image #1] flow) gets
+            // the paste shortcut, same as raw image data — not a quoted path.
+            if isLocal, capabilities.nativeClipboardImageData {
+                return .nativeClipboard
+            }
             let pathSyntax = capabilities.imagePath ?? capabilities.filePath
             return pathSyntax.map(AgentAttachmentDeliveryAction.devicePaths) ?? .unsupported
         case .files(allImages: false):
