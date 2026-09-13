@@ -1,0 +1,790 @@
+#!/usr/bin/env bash
+# Drive the herdrm macOS console the way a user does.
+# Invocation is documented in ../SKILL.md. Do not kill by process name.
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SKILL_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+
+BUNDLE_ID="dev.bybee.herdrm"
+PROCESS_NAME="herdrm"
+STATE_DIR=${HERDRM_VERIFY_STATE_DIR:-/tmp/herdrm-verify}
+STATE_FILE="$STATE_DIR/state.env"
+DEFAULT_SOCKET="${HOME}/.config/herdr/herdr.sock"
+LAUNCH_TIMEOUT=${HERDRM_LAUNCH_TIMEOUT:-25}
+AX_TIMEOUT=${HERDRM_AX_TIMEOUT:-8}
+
+usage() {
+  cat <<'EOF'
+control-herdrm — Accessibility harness for the herdrm macOS console
+
+  control-herdrm launch [--rebuild] [--app PATH]
+  control-herdrm doctor [--json]
+  control-herdrm activate
+  control-herdrm menu --path "File>New Agent"
+  control-herdrm key --chord cmd+k
+  control-herdrm click --name "New Agent" [--role button]
+  control-herdrm wait --name "Start Agent" [--timeout 8]
+  control-herdrm type --text "query"
+  control-herdrm snapshot [--path FILE]
+  control-herdrm screenshot [--path FILE]
+  control-herdrm reset-ui
+  control-herdrm quit
+  control-herdrm cleanup
+  control-herdrm selftest
+
+Environment:
+  HERDRM_VERIFY_STATE_DIR   state for the instance this run started (default /tmp/herdrm-verify)
+  HERDRM_VERIFY_EVIDENCE    proof directory (default <skill>/artifacts/<run-id>)
+  HERDRM_APP                app bundle to open (default repo Debug build)
+  HERDRM_LAUNCH_TIMEOUT     seconds to wait for the process + window (default 25)
+EOF
+}
+
+die() {
+  echo "control-herdrm: $*" >&2
+  exit 1
+}
+
+die_env() {
+  echo "control-herdrm: $*" >&2
+  exit 2
+}
+
+is_macos() {
+  [[ "$(uname -s)" == "Darwin" ]]
+}
+
+find_repo_root() {
+  local dir=$SKILL_DIR
+  while [[ "$dir" != "/" ]]; do
+    if [[ -f "$dir/Makefile" && -d "$dir/Sources/HerdrM" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  die "could not find the herdrm repository root from $SKILL_DIR"
+}
+
+repo_root() {
+  if [[ -n "${HERDRM_REPO_ROOT:-}" ]]; then
+    printf '%s\n' "$HERDRM_REPO_ROOT"
+    return
+  fi
+  find_repo_root
+}
+
+default_app() {
+  printf '%s/build/Build/Products/Debug/herdrm.app\n' "$(repo_root)"
+}
+
+app_path() {
+  printf '%s\n' "${HERDRM_APP:-$(default_app)}"
+}
+
+load_state() {
+  if [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+  fi
+}
+
+save_state() {
+  mkdir -p "$STATE_DIR"
+  cat >"$STATE_FILE" <<EOF
+RUN_ID=$(printf '%q' "${RUN_ID:-}")
+PID=$(printf '%q' "${PID:-}")
+APP_PATH=$(printf '%q' "${APP_PATH:-}")
+EVIDENCE_DIR=$(printf '%q' "${EVIDENCE_DIR:-}")
+SAVED_LANGUAGE=$(printf '%q' "${SAVED_LANGUAGE:-}")
+SAVED_APPLE_LANGUAGES=$(printf '%q' "${SAVED_APPLE_LANGUAGES:-}")
+LANGUAGE_TOUCHED=$(printf '%q' "${LANGUAGE_TOUCHED:-0}")
+EOF
+}
+
+evidence_dir() {
+  load_state
+  if [[ -n "${HERDRM_VERIFY_EVIDENCE:-}" ]]; then
+    printf '%s\n' "$HERDRM_VERIFY_EVIDENCE"
+    return
+  fi
+  if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+    printf '%s\n' "$EVIDENCE_DIR"
+    return
+  fi
+  printf '%s/artifacts/unbound\n' "$SKILL_DIR"
+}
+
+ensure_evidence_dir() {
+  local dir
+  dir=$(evidence_dir)
+  mkdir -p "$dir"
+  printf '%s\n' "$dir"
+}
+
+as_quote() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+osascript_ok() {
+  osascript -e "$1"
+}
+
+herdrm_pids() {
+  pgrep -x "$PROCESS_NAME" || true
+}
+
+pid_alive() {
+  local pid=$1
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+pid_executable() {
+  local pid=$1
+  ps -p "$pid" -o args= 2>/dev/null | awk '{print $1}'
+}
+
+socket_accepts() {
+  local path=${1:-$DEFAULT_SOCKET}
+  [[ -S "$path" ]] || return 1
+  python3 - "$path" <<'PY'
+import socket, sys
+path = sys.argv[1]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+try:
+    s.connect(path)
+except Exception:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+ax_trusted() {
+  osascript -e 'tell application "System Events" to get name of first process' >/dev/null 2>&1
+}
+
+ax_window_present() {
+  osascript >/dev/null 2>&1 <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "herdrm") then error "no process"
+  tell process "herdrm"
+    if (count of windows) < 1 then error "no window"
+  end tell
+end tell
+APPLESCRIPT
+}
+
+herdrm_window_id() {
+  osascript <<'APPLESCRIPT'
+tell application "System Events"
+  tell process "herdrm"
+    if (count of windows) < 1 then error "no window"
+    get value of attribute "AXWindowNumber" of window 1
+  end tell
+end tell
+APPLESCRIPT
+}
+
+restore_language() {
+  load_state
+  [[ "${LANGUAGE_TOUCHED:-0}" == "1" ]] || return 0
+  if [[ -n "${SAVED_LANGUAGE:-}" ]]; then
+    defaults write "$BUNDLE_ID" app.language "$SAVED_LANGUAGE" || true
+  else
+    defaults delete "$BUNDLE_ID" app.language 2>/dev/null || true
+  fi
+  if [[ -n "${SAVED_APPLE_LANGUAGES:-}" ]]; then
+    # Saved as a comma-joined list from `defaults read`.
+    defaults write "$BUNDLE_ID" AppleLanguages -array $SAVED_APPLE_LANGUAGES || true
+  else
+    defaults delete "$BUNDLE_ID" AppleLanguages 2>/dev/null || true
+  fi
+}
+
+force_english_defaults() {
+  load_state
+  SAVED_LANGUAGE=$(defaults read "$BUNDLE_ID" app.language 2>/dev/null || true)
+  SAVED_APPLE_LANGUAGES=$(defaults read "$BUNDLE_ID" AppleLanguages 2>/dev/null | tr -d '"(),' | xargs || true)
+  LANGUAGE_TOUCHED=1
+  defaults write "$BUNDLE_ID" app.language en
+  defaults write "$BUNDLE_ID" AppleLanguages -array en
+  save_state
+}
+
+build_app() {
+  local root rebuild=$1
+  root=$(repo_root)
+  local app
+  app=$(app_path)
+  if [[ "$rebuild" != "1" && -d "$app" ]]; then
+    return 0
+  fi
+  command -v xcodegen >/dev/null || die_env "xcodegen is required to build herdrm (brew install xcodegen)"
+  command -v xcodebuild >/dev/null || die_env "xcodebuild is required to build herdrm (install Xcode)"
+  (
+    cd "$root"
+    xcodegen generate
+    if ! xcodebuild -project HerdrM.xcodeproj -scheme HerdrM -configuration Debug \
+      -derivedDataPath build build -skipPackagePluginValidation \
+      >/tmp/herdrm-verify-xcodebuild.log 2>&1; then
+      echo "control-herdrm: Developer ID build failed; retrying ad-hoc unsigned Debug" >&2
+      xcodebuild -project HerdrM.xcodeproj -scheme HerdrM -configuration Debug \
+        -derivedDataPath build build -skipPackagePluginValidation \
+        CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=NO \
+        >/tmp/herdrm-verify-xcodebuild.log 2>&1 \
+        || die "xcodebuild failed; see /tmp/herdrm-verify-xcodebuild.log"
+    fi
+  )
+  [[ -d "$app" ]] || die "build finished but $app is missing"
+}
+
+cmd_launch() {
+  local rebuild=0
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --rebuild) rebuild=1; shift ;;
+      --app) HERDRM_APP=$2; shift 2 ;;
+      *) die_env "unknown launch flag: $1" ;;
+    esac
+  done
+
+  is_macos || die_env "herdrm is a macOS 14+ app; this host is $(uname -s | tr '[:upper:]' '[:lower:]')"
+
+  local existing
+  existing=$(herdrm_pids)
+  if [[ -n "$existing" ]]; then
+    die "herdrm is already running (pid $existing). Refuse to drive a shared instance — it uses ~/Library/Application Support/HerdrM/devices.json and the default herdr socket, and attach --takeover steals the user's pane."
+  fi
+
+  local app
+  app=$(app_path)
+  build_app "$rebuild"
+  [[ -d "$app" ]] || die "app bundle not found: $app"
+
+  RUN_ID=$(date +%Y%m%dT%H%M%S)-$$
+  APP_PATH=$app
+  EVIDENCE_DIR="${HERDRM_VERIFY_EVIDENCE:-$SKILL_DIR/artifacts/$RUN_ID}"
+  mkdir -p "$EVIDENCE_DIR"
+  LANGUAGE_TOUCHED=0
+  save_state
+  force_english_defaults
+
+  open "$app"
+  local deadline=$((SECONDS + LAUNCH_TIMEOUT))
+  local pid=""
+  while (( SECONDS < deadline )); do
+    pid=$(herdrm_pids | head -n 1 || true)
+    if [[ -n "$pid" ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+  [[ -n "$pid" ]] || die "herdrm did not start within ${LAUNCH_TIMEOUT}s"
+  PID=$pid
+  save_state
+
+  while (( SECONDS < deadline )); do
+    if ax_window_present; then
+      echo "launched pid=$PID app=$APP_PATH evidence=$EVIDENCE_DIR"
+      return 0
+    fi
+    sleep 0.3
+  done
+  die "herdrm process $PID started but no Accessibility window appeared within ${LAUNCH_TIMEOUT}s (grant Accessibility to the driving terminal if System Events cannot see the window)"
+}
+
+cmd_doctor() {
+  local json=0
+  if [[ "${1:-}" == "--json" ]]; then
+    json=1
+  fi
+  load_state
+
+  local os
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  local launchable=false
+  local reason=""
+  local process="absent"
+  local pid_now=""
+  local bundle="absent"
+  local owned="no"
+  local herdr="absent"
+  local ax="n/a"
+  local window="absent"
+  local verdict="not-worth-driving"
+
+  if ! is_macos; then
+    reason="herdrm is a macOS 14+ SwiftUI app; this host is $os"
+  else
+    launchable=true
+    pid_now=$(herdrm_pids | head -n 1 || true)
+    if [[ -n "$pid_now" ]]; then
+      process="running"
+      bundle=$(pid_executable "$pid_now")
+      if [[ -n "${PID:-}" ]]; then
+        if [[ "$pid_now" == "$PID" ]]; then
+          owned="yes"
+        else
+          owned="foreign"
+          reason="running herdrm pid $pid_now is not the instance this run launched (${PID:-unset})"
+        fi
+      else
+        owned="unknown"
+        reason="herdrm is running but this run has no launch state; refuse to drive a shared instance"
+      fi
+      if ax_trusted; then
+        ax="trusted"
+        if ax_window_present; then
+          window="present"
+        else
+          window="absent"
+          reason="${reason:-Accessibility sees the process but no window}"
+        fi
+      else
+        ax="denied"
+        reason="${reason:-System Events cannot read processes; grant Accessibility to the driving app}"
+      fi
+    else
+      reason="herdrm is not running"
+    fi
+    if socket_accepts "$DEFAULT_SOCKET"; then
+      herdr="accepting"
+    elif [[ -e "$DEFAULT_SOCKET" ]]; then
+      herdr="stale-socket"
+    else
+      herdr="absent"
+    fi
+    if [[ "$process" == "running" && "$owned" == "yes" && "$window" == "present" ]]; then
+      verdict="worth-driving"
+      reason="${reason:-ok}"
+    fi
+  fi
+
+  if [[ "$json" == "1" ]]; then
+    python3 - "$os" "$launchable" "$reason" "$process" "$pid_now" "$bundle" "$owned" "$herdr" "$ax" "$window" "$verdict" "${APP_PATH:-}" "${EVIDENCE_DIR:-}" <<'PY'
+import json, sys
+keys = ["os","launchable","reason","process","pid","bundle","owned","herdr_socket","ax","window","verdict","app_path","evidence_dir"]
+vals = sys.argv[1:]
+print(json.dumps(dict(zip(keys, vals)), indent=2))
+PY
+  else
+    cat <<EOF
+os:            $os
+launchable:    $launchable
+process:       $process
+pid:           ${pid_now:-}
+bundle:        $bundle
+owned:         $owned
+window:        $window
+ax:            $ax
+herdr_socket:  $herdr
+app_path:      ${APP_PATH:-}
+evidence_dir:  ${EVIDENCE_DIR:-}
+verdict:       $verdict
+reason:        $reason
+EOF
+  fi
+
+  if [[ "$verdict" != "worth-driving" ]]; then
+    return 1
+  fi
+}
+
+cmd_activate() {
+  is_macos || die_env "activate requires macOS"
+  osascript >/dev/null <<'APPLESCRIPT'
+tell application "System Events"
+  if not (exists process "herdrm") then error "herdrm is not running"
+  tell process "herdrm" to set frontmost to true
+end tell
+APPLESCRIPT
+}
+
+cmd_menu() {
+  local path=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --path) path=$2; shift 2 ;;
+      *) die_env "unknown menu flag: $1" ;;
+    esac
+  done
+  [[ -n "$path" ]] || die_env "menu requires --path 'File>New Agent'"
+  is_macos || die_env "menu requires macOS"
+  cmd_activate
+  IFS='>' read -r menu item <<<"$path"
+  [[ -n "$menu" && -n "$item" ]] || die_env "menu path must look like File>New Agent"
+  osascript >/dev/null <<APPLESCRIPT
+tell application "System Events"
+  tell process "herdrm"
+    set frontmost to true
+    click menu item $(as_quote "$item") of menu $(as_quote "$menu") of menu bar 1
+  end tell
+end tell
+APPLESCRIPT
+}
+
+parse_chord() {
+  local chord=$1
+  local keys=()
+  local key=""
+  IFS='+' read -ra parts <<<"$chord"
+  for part in "${parts[@]}"; do
+    local p
+    p=$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]')
+    case $p in
+      cmd|command|meta) keys+=("command down") ;;
+      shift) keys+=("shift down") ;;
+      alt|option) keys+=("option down") ;;
+      ctrl|control) keys+=("control down") ;;
+      enter|return) key="return" ;;
+      esc|escape) key="escape" ;;
+      space) key="space" ;;
+      tab) key="tab" ;;
+      up) key="up arrow" ;;
+      down) key="down arrow" ;;
+      left) key="left arrow" ;;
+      right) key="right arrow" ;;
+      *)
+        if [[ -z "$key" ]]; then
+          key=$p
+        else
+          die_env "chord has extra key: $part"
+        fi
+        ;;
+    esac
+  done
+  [[ -n "$key" ]] || die_env "chord $chord has no key"
+  local using=""
+  if [[ ${#keys[@]} -gt 0 ]]; then
+    local joined
+    joined=$(IFS=', '; echo "${keys[*]}")
+    using=" using {$joined}"
+  fi
+  if [[ ${#key} -eq 1 ]]; then
+    printf 'keystroke %s%s\n' "$(as_quote "$key")" "$using"
+    return
+  fi
+  case $key in
+    return) printf 'key code 36%s\n' "$using" ;;
+    escape) printf 'key code 53%s\n' "$using" ;;
+    space) printf 'key code 49%s\n' "$using" ;;
+    tab) printf 'key code 48%s\n' "$using" ;;
+    "up arrow") printf 'key code 126%s\n' "$using" ;;
+    "down arrow") printf 'key code 125%s\n' "$using" ;;
+    "left arrow") printf 'key code 123%s\n' "$using" ;;
+    "right arrow") printf 'key code 124%s\n' "$using" ;;
+    *) die_env "unsupported key in chord: $key" ;;
+  esac
+}
+
+cmd_key() {
+  local chord=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --chord) chord=$2; shift 2 ;;
+      *) die_env "unknown key flag: $1" ;;
+    esac
+  done
+  [[ -n "$chord" ]] || die_env "key requires --chord cmd+k"
+  is_macos || die_env "key requires macOS"
+  cmd_activate
+  local line
+  line=$(parse_chord "$chord")
+  osascript >/dev/null <<APPLESCRIPT
+tell application "System Events"
+  tell process "herdrm" to set frontmost to true
+end tell
+tell application "System Events"
+  $line
+end tell
+APPLESCRIPT
+}
+
+cmd_click() {
+  local name="" role="button"
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --name) name=$2; shift 2 ;;
+      --role) role=$2; shift 2 ;;
+      *) die_env "unknown click flag: $1" ;;
+    esac
+  done
+  [[ -n "$name" ]] || die_env "click requires --name"
+  is_macos || die_env "click requires macOS"
+  cmd_activate
+  osascript >/dev/null <<APPLESCRIPT
+tell application "System Events"
+  tell process "herdrm"
+    set frontmost to true
+    set targetName to $(as_quote "$name")
+    set targetRole to $(as_quote "$role")
+    set clicked to false
+    -- Prefer an exact role+name match in the front window, then any AX child.
+    try
+      if targetRole is "button" then
+        click button targetName of window 1
+        set clicked to true
+      else if targetRole is "text field" or targetRole is "textfield" then
+        set focused of text field targetName of window 1 to true
+        set clicked to true
+      else
+        click (first UI element of window 1 whose name is targetName)
+        set clicked to true
+      end if
+    end try
+    if not clicked then
+      repeat with ui in (entire contents of window 1)
+        try
+          if name of ui is targetName then
+            click ui
+            set clicked to true
+            exit repeat
+          end if
+        end try
+      end repeat
+    end if
+    if not clicked then error "no AX element named " & targetName
+  end tell
+end tell
+APPLESCRIPT
+}
+
+cmd_wait() {
+  local name="" timeout=$AX_TIMEOUT
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --name) name=$2; shift 2 ;;
+      --timeout) timeout=$2; shift 2 ;;
+      *) die_env "unknown wait flag: $1" ;;
+    esac
+  done
+  [[ -n "$name" ]] || die_env "wait requires --name"
+  is_macos || die_env "wait requires macOS"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if osascript >/dev/null 2>&1 <<APPLESCRIPT
+tell application "System Events"
+  tell process "herdrm"
+    set targetName to $(as_quote "$name")
+    if name of window 1 is targetName then return
+    repeat with ui in (entire contents of window 1)
+      try
+        if name of ui is targetName then return
+      end try
+    end repeat
+    error "missing"
+  end tell
+end tell
+APPLESCRIPT
+    then
+      echo "present: $name"
+      return 0
+    fi
+    sleep 0.25
+  done
+  die "timed out waiting for Accessibility name $name"
+}
+
+cmd_type() {
+  local text=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --text) text=$2; shift 2 ;;
+      *) die_env "unknown type flag: $1" ;;
+    esac
+  done
+  [[ -n "$text" ]] || die_env "type requires --text"
+  is_macos || die_env "type requires macOS"
+  cmd_activate
+  osascript >/dev/null <<APPLESCRIPT
+tell application "System Events"
+  tell process "herdrm" to set frontmost to true
+end tell
+delay 0.1
+tell application "System Events"
+  keystroke $(as_quote "$text")
+end tell
+APPLESCRIPT
+}
+
+cmd_snapshot() {
+  local path=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --path) path=$2; shift 2 ;;
+      *) die_env "unknown snapshot flag: $1" ;;
+    esac
+  done
+  is_macos || die_env "snapshot requires macOS"
+  if [[ -z "$path" ]]; then
+    path="$(ensure_evidence_dir)/ax-snapshot.txt"
+  else
+    mkdir -p "$(dirname "$path")"
+  fi
+  cmd_activate
+  osascript <<'APPLESCRIPT' >"$path"
+tell application "System Events"
+  tell process "herdrm"
+    set frontmost to true
+    set out to "window:" & (name of window 1) & linefeed
+    repeat with ui in (entire contents of window 1)
+      try
+        set roleName to ""
+        try
+          set roleName to role of ui as string
+        end try
+        set uiName to ""
+        try
+          set uiName to name of ui as string
+        end try
+        if uiName is not "" then
+          set out to out & roleName & "	" & uiName & linefeed
+        end if
+      end try
+    end repeat
+    return out
+  end tell
+end tell
+APPLESCRIPT
+  echo "$path"
+}
+
+cmd_screenshot() {
+  local path=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --path) path=$2; shift 2 ;;
+      *) die_env "unknown screenshot flag: $1" ;;
+    esac
+  done
+  is_macos || die_env "screenshot requires macOS"
+  if [[ -z "$path" ]]; then
+    path="$(ensure_evidence_dir)/window.png"
+  else
+    mkdir -p "$(dirname "$path")"
+  fi
+  cmd_activate
+  sleep 0.2
+  local wid=""
+  wid=$(herdrm_window_id 2>/dev/null || true)
+  if [[ -n "$wid" ]]; then
+    screencapture -o -l "$wid" "$path" || screencapture -o -x "$path"
+  else
+    screencapture -o -x "$path"
+  fi
+  echo "$path"
+}
+
+cmd_reset_ui() {
+  is_macos || die_env "reset-ui requires macOS"
+  # Dismiss sheets/popovers the way a user would. Escape is the cancel shortcut
+  # on Add Device / New Agent / New Terminal / New Space / Search.
+  local i
+  for i in 1 2 3; do
+    cmd_key --chord escape || true
+    sleep 0.15
+  done
+}
+
+cmd_quit() {
+  load_state
+  is_macos || die_env "quit requires macOS"
+  if [[ -z "${PID:-}" ]]; then
+    die "no launch state; refusing to quit an instance this run did not start"
+  fi
+  if ! pid_alive "$PID"; then
+    echo "already exited pid=$PID"
+    restore_language
+    return 0
+  fi
+  local now
+  now=$(herdrm_pids)
+  if [[ "$now" != "$PID" && -n "$now" ]]; then
+    die "refusing to quit: live herdrm pids ($now) are not only the launched pid $PID"
+  fi
+  osascript >/dev/null <<APPLESCRIPT
+tell application id "$BUNDLE_ID" to quit
+APPLESCRIPT
+  local deadline=$((SECONDS + 15))
+  while pid_alive "$PID" && (( SECONDS < deadline )); do
+    sleep 0.2
+  done
+  if pid_alive "$PID"; then
+    # Last resort against the recorded PID only — never killall.
+    kill "$PID" || true
+    sleep 0.5
+  fi
+  restore_language
+  echo "quit pid=$PID"
+}
+
+cmd_selftest() {
+  local fail=0
+  local out
+  out=$(cmd_doctor --json || true)
+  if ! printf '%s' "$out" | grep -q '"verdict": "not-worth-driving"'; then
+    echo "selftest: doctor --json must report not-worth-driving when the app is not ours" >&2
+    fail=1
+  fi
+  if is_macos; then
+    echo "selftest: macOS host — doctor json captured; live launch is a separate step"
+  else
+    if ! printf '%s' "$out" | grep -q 'macOS 14+'; then
+      echo "selftest: linux doctor must name the macOS prerequisite" >&2
+      fail=1
+    fi
+    if "$0" menu >/dev/null 2>&1; then
+      echo "selftest: menu without --path must fail" >&2
+      fail=1
+    fi
+    if "$0" launch >/dev/null 2>&1; then
+      echo "selftest: launch on $(uname -s) must fail" >&2
+      fail=1
+    fi
+  fi
+  if [[ "$fail" -ne 0 ]]; then
+    die "selftest failed"
+  fi
+  echo "selftest ok"
+}
+
+cmd_cleanup() {
+  # Tear down the instance and scratch state. Evidence stays.
+  local kept
+  kept=$(evidence_dir)
+  if is_macos && [[ -f "$STATE_FILE" ]]; then
+    cmd_quit || true
+  fi
+  if [[ -d "$STATE_DIR" ]]; then
+    rm -f "$STATE_FILE"
+    rmdir "$STATE_DIR" 2>/dev/null || true
+  fi
+  echo "cleanup done; evidence left at $kept"
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+  launch) cmd_launch "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  activate) cmd_activate "$@" ;;
+  menu) cmd_menu "$@" ;;
+  key) cmd_key "$@" ;;
+  click) cmd_click "$@" ;;
+  wait) cmd_wait "$@" ;;
+  type) cmd_type "$@" ;;
+  snapshot) cmd_snapshot "$@" ;;
+  screenshot) cmd_screenshot "$@" ;;
+  reset-ui) cmd_reset_ui "$@" ;;
+  quit) cmd_quit "$@" ;;
+  cleanup) cmd_cleanup "$@" ;;
+  selftest) cmd_selftest "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) die_env "unknown command: $cmd" ;;
+esac
