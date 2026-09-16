@@ -1,6 +1,70 @@
 import HerdrKit
 import SwiftUI
 
+private func isConnectedEmptyAgents(_ model: MobileAppModel) -> Bool {
+    if case .connected = model.selectedConnectionState {
+        return model.agents.isEmpty
+    }
+    return false
+}
+
+/// Empty Agents copy: this Space vs this device. Mobile cannot create agents.
+private struct EmptyAgentsGuidance: View {
+    @Bindable var model: MobileAppModel
+    var compact: Bool
+
+    private var spaceIsEmpty: Bool {
+        model.selectedSpaceID != nil && !model.deviceAgents.isEmpty
+    }
+
+    private var title: String {
+        spaceIsEmpty
+            ? String(localized: "No agents in this space")
+            : String(localized: "No agents")
+    }
+
+    private var detail: String {
+        spaceIsEmpty
+            ? String(localized: "Look in All Spaces, or start one on the Mac running herdr.")
+            : String(localized: "Start an agent on the Mac running herdr.")
+    }
+
+    var body: some View {
+        if compact {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if spaceIsEmpty {
+                    allSpacesButton
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
+        } else {
+            ContentUnavailableView {
+                Label(title, systemImage: "terminal")
+            } description: {
+                Text(detail)
+            } actions: {
+                if spaceIsEmpty {
+                    allSpacesButton
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+    }
+
+    private var allSpacesButton: some View {
+        Button(String(localized: "All Spaces")) {
+            model.selectedSpaceID = nil
+        }
+    }
+}
+
 /// iPhone: a navigation stack (lists → terminal). iPad: a split view whose
 /// sidebar mirrors the Mac app — Spaces, Agents, and a device switcher footer.
 struct MobileRootView: View {
@@ -29,6 +93,8 @@ struct MobileRootView: View {
                     title: model.terminalLabel(for: pane)
                 )
                 .id(pane.paneID)
+            } else if isConnectedEmptyAgents(model) {
+                EmptyAgentsGuidance(model: model, compact: false)
             } else {
                 ContentUnavailableView(
                     String(localized: "No Agent Selected"),
@@ -170,9 +236,14 @@ private struct SidebarListView: View {
     private var agentsSection: some View {
         Section(String(localized: "Agents")) {
             if model.agents.isEmpty {
-                Text(String(localized: "No agents"))
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
+                if isConnectedEmptyAgents(model) {
+                    EmptyAgentsGuidance(model: model, compact: true)
+                        .listRowSeparator(.hidden)
+                } else {
+                    Text(String(localized: "No agents"))
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
             }
             ForEach(model.agents) { agent in
                 NavigationLink(value: agent.paneID) {

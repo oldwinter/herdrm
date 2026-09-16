@@ -216,6 +216,12 @@ final class MobileAppModel {
         return selectedSession?.snapshot?.workspaces ?? []
     }
 
+    /// Unfiltered agents on the selected device. `agents` is space-scoped.
+    var deviceAgents: [AgentInfo] {
+        _ = revision
+        return selectedSession?.snapshot?.agents ?? []
+    }
+
     /// Agents in the selected space (nil = all), waiting-on-you first —
     /// the same Blocked > Done > Working > Idle order as the Mac app and Heeler.
     var agents: [AgentInfo] {
