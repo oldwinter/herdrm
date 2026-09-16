@@ -547,12 +547,38 @@ private struct DeviceFilePane: View {
             .padding(4)
         }
         .overlay {
-            if browser.entries.isEmpty, !browser.isLoading, browser.error == nil {
-                ContentUnavailableView(
-                    "Empty Folder",
-                    systemImage: "folder",
-                    description: Text("This folder contains no visible items.")
-                )
+            if !browser.isLoading, let error = browser.error {
+                ContentUnavailableView {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                } actions: {
+                    Button("Retry") {
+                        Task { await browser.refresh() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    if browser.currentPath != "/" {
+                        Button("Parent folder") {
+                            Task { await browser.goUp() }
+                        }
+                    }
+                    Button("Home folder") {
+                        Task { await browser.goHome() }
+                    }
+                }
+            } else if browser.entries.isEmpty, !browser.isLoading {
+                ContentUnavailableView {
+                    Label("Empty Folder", systemImage: "folder")
+                } description: {
+                    Text("This folder contains no visible items.")
+                } actions: {
+                    if !browser.includesHidden {
+                        Button("Show hidden files") {
+                            Task { await browser.toggleHidden() }
+                        }
+                    }
+                    Button("Home folder") {
+                        Task { await browser.goHome() }
+                    }
+                }
             }
         }
     }
