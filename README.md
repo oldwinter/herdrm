@@ -13,11 +13,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/missuo/herdrm/releases/latest"><img src="https://img.shields.io/github/v/release/missuo/herdrm" alt="Latest release" /></a>
+  <a href="https://github.com/missuo/herdrm/releases/latest"><img src="https://img.shields.io/github/v/release/missuo/herdrm" alt="Latest release (upstream)" /></a>
   <a href="#-requirements"><img src="https://img.shields.io/badge/macOS-14%2B-brightgreen" alt="macOS 14+" /></a>
-  <a href="https://github.com/missuo/herdrm/releases"><img src="https://img.shields.io/github/downloads/missuo/herdrm/total" alt="Downloads" /></a>
+  <a href="https://github.com/missuo/herdrm/releases"><img src="https://img.shields.io/github/downloads/missuo/herdrm/total" alt="Downloads (upstream)" /></a>
   <a href="#-status"><img src="https://img.shields.io/badge/status-early--stage-f59e0b" alt="Status: early stage" /></a>
   <a href="#-contributing"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome" /></a>
+</p>
+
+<p align="center">
+  Working fork: <a href="https://github.com/oldwinter/herdrm"><code>oldwinter/herdrm</code></a> —
+  file bugs and PRs <a href="https://github.com/oldwinter/herdrm/issues">here</a>; binary releases
+  are published <a href="https://github.com/missuo/herdrm/releases">upstream at missuo/herdrm</a>.
 </p>
 
 <p align="center">
@@ -143,7 +149,7 @@ herdrm is the same model, built for people who'd rather click:
 brew install owo-network/brew/herdrm
 ```
 
-**Manual** — download `herdrm-x.y.z.zip` from [Releases](https://github.com/missuo/herdrm/releases),
+**Manual** — download `herdrm-x.y.z.zip` from [upstream Releases](https://github.com/missuo/herdrm/releases),
 unzip, drag `herdrm.app` into `/Applications`. Either way it self-updates from then on — **HerdrM
 → Check for Updates…**, or **HerdrM → About HerdrM** for the version you're running.
 
@@ -187,7 +193,7 @@ make kit-test  # HerdrKit integration tests (needs a running local herdr)
 
 Early-stage software, PRs genuinely welcome — small and single-purpose lands fastest.
 
-- **Bug?** [Open an issue](https://github.com/missuo/herdrm/issues/new) with your macOS
+- **Bug?** [Open an issue](https://github.com/oldwinter/herdrm/issues/new) with your macOS
   version, `herdr --version`, and repro steps.
 - **Feature idea?** Open an issue first for anything beyond a small PR.
 - **Sending a PR:** `make build` + `make kit-test` locally (no CI gate yet — this is the bar),

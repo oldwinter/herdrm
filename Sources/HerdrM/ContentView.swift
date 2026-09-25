@@ -435,8 +435,13 @@ struct DetailView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.textTertiary)
                 if showsStartAgentShortcut {
-                    Button("New Agent…") {
-                        model.showNewAgent = true
+                    HStack(spacing: 8) {
+                        Button("New Agent… ⌘N") {
+                            model.showNewAgent = true
+                        }
+                        Button("New Terminal… ⌘T") {
+                            model.showNewTerminal = true
+                        }
                     }
                     .controlSize(.small)
                 } else if model.hasReconnectableDevice {
