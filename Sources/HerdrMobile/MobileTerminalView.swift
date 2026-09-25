@@ -17,7 +17,7 @@ final class MobileAttachSession: ObservableObject {
     enum Status: Equatable {
         case connecting
         case running
-        case ended(String)
+        case ended(title: String, detail: String)
     }
 
     @Published var status: Status = .connecting
@@ -25,6 +25,9 @@ final class MobileAttachSession: ObservableObject {
     let target: TerminalAttachTarget
     private var channel: SSHPTYChannel?
     private var readTask: Task<Void, Never>?
+    /// Last `start` / `resize` grid. Reconnect uses this, not a hardcoded 80×24.
+    private(set) var lastColumns = 80
+    private(set) var lastRows = 24
     /// Bytes before the bootstrap marker are shell rc chatter, not pane output.
     private var sawBootstrapMarker = false
     private var bootstrapBuffer = Data()
@@ -46,6 +49,10 @@ final class MobileAttachSession: ObservableObject {
 
     func start(columns: Int, rows: Int) {
         guard channel == nil else { return }
+        lastColumns = max(columns, 20)
+        lastRows = max(rows, 5)
+        let openColumns = lastColumns
+        let openRows = lastRows
         status = .connecting
         sawBootstrapMarker = false
         bootstrapBuffer.removeAll()
@@ -53,32 +60,53 @@ final class MobileAttachSession: ObservableObject {
             do {
                 let channel = try await transport.openTerminal(
                     command: MobileAttach.command(target: target),
-                    columns: max(columns, 20),
-                    rows: max(rows, 5)
+                    columns: openColumns,
+                    rows: openRows
                 )
                 self.channel = channel
+                if self.lastColumns != openColumns || self.lastRows != openRows {
+                    try? await channel.resize(
+                        columns: self.lastColumns, rows: self.lastRows, timeout: .seconds(5)
+                    )
+                }
                 self.status = .running
                 self.pump(channel)
             } catch {
                 self.status = .ended(
-                    (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                    title: String(localized: "Couldn't attach"),
+                    detail: (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 )
             }
         }
     }
 
+    func reconnect() {
+        stop()
+        start(columns: lastColumns, rows: lastRows)
+    }
+
     private func pump(_ channel: SSHPTYChannel) {
         readTask = Task { [weak self] in
+            // Distinguish transport loss from a clean remote EOF without
+            // reading PTY exitStatus — mobile attach only sees the stream.
+            var connectionDropped = false
             do {
                 while !Task.isCancelled {
                     guard let data = try await channel.read(timeout: .seconds(3600)) else { break }
                     guard !data.isEmpty else { continue }
                     self?.ingest(data)
                 }
-            } catch {}
+            } catch {
+                connectionDropped = true
+            }
             guard let self, !Task.isCancelled else { return }
             if case .running = self.status {
-                self.status = .ended(String(localized: "Session ended"))
+                self.status = .ended(
+                    title: String(localized: "Terminal session ended"),
+                    detail: connectionDropped
+                        ? String(localized: "The SSH connection behind this terminal went away.")
+                        : String(localized: "Another client took this pane over, or the attach closed.")
+                )
             }
         }
     }
@@ -144,7 +172,10 @@ final class MobileAttachSession: ObservableObject {
     }
 
     func resize(columns: Int, rows: Int) {
-        guard let channel, columns > 0, rows > 0 else { return }
+        guard columns > 0, rows > 0 else { return }
+        lastColumns = columns
+        lastRows = rows
+        guard let channel else { return }
         Task { try? await channel.resize(columns: columns, rows: rows, timeout: .seconds(5)) }
     }
 
@@ -178,9 +209,7 @@ struct MobileTerminalScreen: View {
                 MobileTerminalHost(session: session, keyboardShown: $keyboardShown)
                 controls
             }
-            if case .ended(let reason) = session.status {
-                endedOverlay(reason)
-            }
+            statusOverlay
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -204,6 +233,12 @@ struct MobileTerminalScreen: View {
         .padding(.top, 8)
         .padding(.bottom, 6)
         .background(.black.opacity(0.35))
+        .disabled(!isLive)
+    }
+
+    private var isLive: Bool {
+        if case .running = session.status { return true }
+        return false
     }
 
     private var keyBar: some View {
@@ -261,19 +296,38 @@ struct MobileTerminalScreen: View {
         composerText = ""
     }
 
-    private func endedOverlay(_ reason: String) -> some View {
-        VStack(spacing: 12) {
-            Text(reason)
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.8))
-            Button(String(localized: "Reconnect")) {
-                session.stop()
-                session.start(columns: 80, rows: 24)
+    @ViewBuilder
+    private var statusOverlay: some View {
+        switch session.status {
+        case .connecting:
+            VStack(spacing: 12) {
+                ProgressView().tint(.white)
+                Text(String(localized: "Attaching…"))
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.85))
             }
-            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(terminalBackground.opacity(0.94))
+        case .ended(let title, let detail):
+            VStack(spacing: 12) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.white)
+                Text(detail)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.75))
+                Button(String(localized: "Reconnect")) {
+                    session.reconnect()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(terminalBackground.opacity(0.94))
+        case .running:
+            EmptyView()
         }
-        .padding(24)
-        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 

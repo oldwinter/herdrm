@@ -257,6 +257,38 @@
         }
       }
     },
+    "Attaching…" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Attaching…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在接入…"
+          }
+        }
+      }
+    },
+    "Couldn't attach" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't attach"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未能接入终端"
+          }
+        }
+      }
+    },
     "No agents" : {
       "localizations" : {
         "en" : {
