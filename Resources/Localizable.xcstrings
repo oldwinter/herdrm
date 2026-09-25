@@ -305,6 +305,54 @@
         }
       }
     },
+    "No agents in this space" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No agents in this space"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此空间暂无 Agent"
+          }
+        }
+      }
+    },
+    "Look in All Spaces, or start one on the Mac running herdr." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Look in All Spaces, or start one on the Mac running herdr."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "看看全部空间，或到 Mac 上的 herdr 里启动。"
+          }
+        }
+      }
+    },
+    "Start an agent on the Mac running herdr." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Start an agent on the Mac running herdr."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "到 Mac 上的 herdr 里启动 Agent。"
+          }
+        }
+      }
+    },
     "All Spaces" : {
       "localizations" : {
         "en" : {
