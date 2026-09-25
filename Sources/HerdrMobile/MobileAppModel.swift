@@ -89,7 +89,11 @@ final class MobileDeviceSession {
             // UI offers Reconnect instead of silently going stale.
             guard let self, !Task.isCancelled else { return }
             if case .connected = self.state {
-                self.state = .failed(String(localized: "Connection lost"))
+                // Same catalog key as the Mac attach overlay, not the
+                // uncatalogued English sidebar copy, and not #12's PTY path.
+                self.state = .failed(
+                    String(localized: "Connection to \(self.device.name) dropped")
+                )
                 self.onChange?()
             }
         }
