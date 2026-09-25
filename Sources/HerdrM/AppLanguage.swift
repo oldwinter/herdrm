@@ -22,7 +22,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         case .english:
             return String(localized: "language.name.en", defaultValue: "English")
         case .simplifiedChinese:
-            return String(localized: "language.name.zh-Hans", defaultValue: "Chinese")
+            return String(localized: "language.name.zh-Hans", defaultValue: "简体中文")
         }
     }
 
