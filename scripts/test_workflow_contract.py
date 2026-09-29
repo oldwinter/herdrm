@@ -19,6 +19,7 @@ class TestWorkflowContract(unittest.TestCase):
         self.assertIn("python3 -m unittest discover -s scripts", source)
         self.assertIn("cd Packages/HerdrKit && swift test", source)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", source)
+        self.assertEqual(source.count("-skipPackagePluginValidation"), 2)
         self.assertIn("-scheme HerdrM", source)
         self.assertIn("-scheme HerdrMobile", source)
 

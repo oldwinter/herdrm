@@ -35,10 +35,11 @@ jobs:
         run: >-
           xcodebuild -project HerdrM.xcodeproj -scheme HerdrM
           -configuration Debug -derivedDataPath build-ci-macos
-          CODE_SIGNING_ALLOWED=NO build
+          -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
 
       - name: Build iOS app without signing
         run: >-
           xcodebuild -project HerdrM.xcodeproj -scheme HerdrMobile
           -configuration Debug -destination 'generic/platform=iOS Simulator'
-          -derivedDataPath build-ci-ios CODE_SIGNING_ALLOWED=NO build
+          -derivedDataPath build-ci-ios -skipPackagePluginValidation
+          CODE_SIGNING_ALLOWED=NO build
