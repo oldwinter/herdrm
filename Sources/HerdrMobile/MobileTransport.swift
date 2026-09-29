@@ -181,16 +181,16 @@ final class SSHDirectTransport: MobileTransport {
                             buffer.removeSubrange(...index)
                             guard !line.isEmpty else { continue }
                             guard sawAck else {
-                                sawAck = true  // first line is the subscribe ack
+                                _ = try SocketRPC.decodeResponse(Data(line))
+                                sawAck = true
                                 continue
                             }
-                            if let value = try? JSONDecoder().decode(JSONValue.self, from: line) {
-                                let kind = value["event"]?["type"]?.stringValue
-                                    ?? value["type"]?.stringValue
-                                    ?? value["kind"]?.stringValue
-                                    ?? "unknown"
-                                continuation.yield(HerdrEvent(kind: kind, payload: value))
-                            }
+                            continuation.yield(try SocketRPC.decodeEvent(Data(line)))
+                        }
+                        if buffer.count > SocketRPC.maximumLineBytes {
+                            throw HerdrError.malformedResponse(
+                                "NDJSON line exceeds \(SocketRPC.maximumLineBytes) bytes"
+                            )
                         }
                     }
                     continuation.finish()

@@ -11,8 +11,12 @@ jobs:
       contents: write
     env:
       SPARKLE_VERSION: "2.9.6"
+      SPARKLE_SHA256: 52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate release tag
+        run: python3 scripts/validate_release_version.py "$GITHUB_REF_NAME" >> "$GITHUB_ENV"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -34,8 +38,6 @@ jobs:
 
       - name: Build and sign
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           xcodegen generate
           xcodebuild -project HerdrM.xcodeproj -scheme HerdrM -configuration Release \
             -derivedDataPath build build -skipPackagePluginValidation \
@@ -109,7 +111,9 @@ jobs:
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          curl -sL -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          curl --fail --location --silent --show-error -o sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          echo "$SPARKLE_SHA256  sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p sparkle && tar -xf sparkle.tar.xz -C sparkle
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/ed_key"
           SIG_ATTRS=$(./sparkle/bin/sign_update -f "$RUNNER_TEMP/ed_key" "herdrm-$VERSION.zip")

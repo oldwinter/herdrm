@@ -4,6 +4,8 @@ import Foundation
 /// Like Heeler, each request opens a fresh connection; event subscriptions
 /// hold one long-lived connection and stream lines.
 public struct SocketRPC: Sendable {
+    public static let maximumLineBytes = 1_048_576
+
     public let socketPath: String
 
     public init(socketPath: String) {
@@ -48,18 +50,14 @@ public struct SocketRPC: Sendable {
                         "subscriptions": .array(kinds.map { .object(["type": .string($0)]) })
                     ])
                     try Self.writeLine(fd: fd, data: Self.encodeRequest(id: "events", method: "events.subscribe", params: subs))
-                    _ = try Self.readLine(fd: fd, timeoutSeconds: 15) // subscribe ack
+                    _ = try Self.decodeResponse(
+                        Self.readLine(fd: fd, timeoutSeconds: 15)
+                    )
                     var buffer = Data()
                     while !Task.isCancelled {
                         guard let line = try Self.readLine(fd: fd, timeoutSeconds: nil, buffer: &buffer) else { break }
                         guard !line.isEmpty else { continue }
-                        if let value = try? JSONDecoder().decode(JSONValue.self, from: line) {
-                            let kind = value["event"]?["type"]?.stringValue
-                                ?? value["type"]?.stringValue
-                                ?? value["kind"]?.stringValue
-                                ?? "unknown"
-                            continuation.yield(HerdrEvent(kind: kind, payload: value))
-                        }
+                        continuation.yield(try Self.decodeEvent(line))
                     }
                     continuation.finish()
                 } catch {
@@ -83,6 +81,7 @@ public struct SocketRPC: Sendable {
 
     public static func decodeResponse(_ line: Data?) throws -> JSONValue {
         guard let line, !line.isEmpty else { throw HerdrError.malformedResponse("empty reply") }
+        try validateLineLength(line.count)
         let value: JSONValue
         do {
             value = try JSONDecoder().decode(JSONValue.self, from: line)
@@ -98,6 +97,29 @@ public struct SocketRPC: Sendable {
             throw HerdrError.malformedResponse("reply has neither result nor error")
         }
         return result
+    }
+
+    public static func decodeEvent(_ line: Data) throws -> HerdrEvent {
+        try validateLineLength(line.count)
+        let value: JSONValue
+        do {
+            value = try JSONDecoder().decode(JSONValue.self, from: line)
+        } catch {
+            throw HerdrError.malformedResponse("undecodable event")
+        }
+        let kind = value["event"]?["type"]?.stringValue
+            ?? value["type"]?.stringValue
+            ?? value["kind"]?.stringValue
+            ?? "unknown"
+        return HerdrEvent(kind: kind, payload: value)
+    }
+
+    static func validateLineLength(_ count: Int) throws {
+        guard count <= maximumLineBytes else {
+            throw HerdrError.malformedResponse(
+                "NDJSON line exceeds \(maximumLineBytes) bytes"
+            )
+        }
     }
 
     static func connect(path: String) throws -> Int32 {
@@ -160,17 +182,16 @@ public struct SocketRPC: Sendable {
     }
 
     static func readLine(fd: Int32, timeoutSeconds: Int32?, buffer: inout Data) throws -> Data? {
+        try configureReadTimeout(fd: fd, timeoutSeconds: timeoutSeconds)
         if let index = buffer.firstIndex(of: 0x0A) {
             let line = buffer.prefix(upTo: index)
             buffer.removeSubrange(...index)
+            try validateLineLength(line.count)
             return Data(line)
         }
+        try validateLineLength(buffer.count)
         var chunk = [UInt8](repeating: 0, count: 65536)
         while true {
-            if let timeoutSeconds {
-                var tv = timeval(tv_sec: Int(timeoutSeconds), tv_usec: 0)
-                _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-            }
             let count = read(fd, &chunk, chunk.count)
             if count == 0 { return buffer.isEmpty ? nil : buffer }
             if count < 0 {
@@ -181,8 +202,25 @@ public struct SocketRPC: Sendable {
             if let index = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.prefix(upTo: index)
                 buffer.removeSubrange(...index)
+                try validateLineLength(line.count)
                 return Data(line)
             }
+            try validateLineLength(buffer.count)
+        }
+    }
+
+    static func configureReadTimeout(fd: Int32, timeoutSeconds: Int32?) throws {
+        var timeout = timeval(tv_sec: Int(timeoutSeconds ?? 0), tv_usec: 0)
+        guard setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        ) == 0 else {
+            throw HerdrError.connectionFailed(
+                "setsockopt(SO_RCVTIMEO): \(String(cString: strerror(errno)))"
+            )
         }
     }
 }

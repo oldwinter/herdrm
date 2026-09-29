@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run Python contracts
+        run: |
+          python3 -m unittest discover -s Tests -p 'test_*.py'
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Test HerdrKit
+        run: cd Packages/HerdrKit && swift test
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build macOS app without signing
+        run: >-
+          xcodebuild -project HerdrM.xcodeproj -scheme HerdrM
+          -configuration Debug -derivedDataPath build-ci-macos
+          -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
+
+      - name: Build iOS app without signing
+        run: >-
+          xcodebuild -project HerdrM.xcodeproj -scheme HerdrMobile
+          -configuration Debug -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath build-ci-ios -skipPackagePluginValidation
+          CODE_SIGNING_ALLOWED=NO build

@@ -34,7 +34,15 @@ class TestConnectionLostCopy(unittest.TestCase):
     def test_pty_session_ended_path_untouched(self) -> None:
         source = MOBILE_TERMINAL.read_text(encoding="utf-8")
         self.assertIn(
-            'self.status = .ended(String(localized: "Session ended"))',
+            'title: String(localized: "Terminal session ended")',
+            source,
+        )
+        self.assertIn(
+            'String(localized: "The SSH connection behind this terminal went away.")',
+            source,
+        )
+        self.assertIn(
+            'String(localized: "Another client took this pane over, or the attach closed.")',
             source,
         )
 

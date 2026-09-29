@@ -24,7 +24,9 @@ final class MobileAttachSession: ObservableObject {
     let transport: MobileTransport
     let target: TerminalAttachTarget
     private var channel: SSHPTYChannel?
+    private var startTask: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
+    private var attachGeneration = 0
     /// Last `start` / `resize` grid. Reconnect uses this, not a hardcoded 80×24.
     private(set) var lastColumns = 80
     private(set) var lastRows = 24
@@ -48,22 +50,30 @@ final class MobileAttachSession: ObservableObject {
     }
 
     func start(columns: Int, rows: Int) {
-        guard channel == nil else { return }
+        guard channel == nil, startTask == nil else { return }
         lastColumns = max(columns, 20)
         lastRows = max(rows, 5)
         let openColumns = lastColumns
         let openRows = lastRows
+        attachGeneration += 1
+        let generation = attachGeneration
         status = .connecting
         sawBootstrapMarker = false
         bootstrapBuffer.removeAll()
-        Task {
+        startTask = Task { [weak self] in
+            guard let self else { return }
             do {
                 let channel = try await transport.openTerminal(
                     command: MobileAttach.command(target: target),
                     columns: openColumns,
                     rows: openRows
                 )
+                guard !Task.isCancelled, generation == attachGeneration else {
+                    try? await channel.close(timeout: .seconds(2))
+                    return
+                }
                 self.channel = channel
+                self.startTask = nil
                 if self.lastColumns != openColumns || self.lastRows != openRows {
                     try? await channel.resize(
                         columns: self.lastColumns, rows: self.lastRows, timeout: .seconds(5)
@@ -72,6 +82,8 @@ final class MobileAttachSession: ObservableObject {
                 self.status = .running
                 self.pump(channel)
             } catch {
+                guard !Task.isCancelled, generation == attachGeneration else { return }
+                self.startTask = nil
                 self.status = .ended(
                     title: String(localized: "Couldn't attach"),
                     detail: (error as? LocalizedError)?.errorDescription ?? "\(error)"
@@ -120,7 +132,7 @@ final class MobileAttachSession: ObservableObject {
         guard let range = bootstrapBuffer.firstRange(of: MobileAttach.bootstrapMarker) else {
             // Cap the gate so a herdr that never prints the marker (old
             // binary, exec failure output) still shows its error text.
-            if bootstrapBuffer.count > 8192 {
+            if bootstrapBuffer.count >= 8192 {
                 sawBootstrapMarker = true
                 feed(bootstrapBuffer)
                 bootstrapBuffer.removeAll()
@@ -180,6 +192,9 @@ final class MobileAttachSession: ObservableObject {
     }
 
     func stop() {
+        attachGeneration += 1
+        startTask?.cancel()
+        startTask = nil
         readTask?.cancel()
         readTask = nil
         if let channel {

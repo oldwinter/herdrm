@@ -45,4 +45,69 @@ final class SocketRPCTests: XCTestCase {
         )
         XCTAssertEqual(noSigPipe, 1)
     }
+
+    func testClearsPriorReceiveTimeoutForBlockingReads() throws {
+        var sockets = [Int32](repeating: -1, count: 2)
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)
+        defer {
+            close(sockets[0])
+            close(sockets[1])
+        }
+
+        try SocketRPC.configureReadTimeout(fd: sockets[0], timeoutSeconds: 15)
+        XCTAssertEqual(try receiveTimeout(fd: sockets[0]).tv_sec, 15)
+
+        try SocketRPC.configureReadTimeout(fd: sockets[0], timeoutSeconds: nil)
+        let cleared = try receiveTimeout(fd: sockets[0])
+        XCTAssertEqual(cleared.tv_sec, 0)
+        XCTAssertEqual(cleared.tv_usec, 0)
+    }
+
+    func testSubscribeAckErrorsAreNotAccepted() throws {
+        let line = Data(#"{"error":{"code":"denied","message":"no access"}}"#.utf8)
+        XCTAssertThrowsError(try SocketRPC.decodeResponse(line)) { error in
+            guard case HerdrError.rpc(let code, let message) = error else {
+                return XCTFail("expected RPC error, got \(error)")
+            }
+            XCTAssertEqual(code, "denied")
+            XCTAssertEqual(message, "no access")
+        }
+    }
+
+    func testMalformedEventIsAProtocolError() {
+        XCTAssertThrowsError(try SocketRPC.decodeEvent(Data("not json".utf8))) { error in
+            guard case HerdrError.malformedResponse(let reason) = error else {
+                return XCTFail("expected malformed response, got \(error)")
+            }
+            XCTAssertEqual(reason, "undecodable event")
+        }
+    }
+
+    func testEventDecoderPreservesValidPayloadAndKind() throws {
+        let event = try SocketRPC.decodeEvent(
+            Data(#"{"event":{"type":"agent.updated"},"value":7}"#.utf8)
+        )
+        XCTAssertEqual(event.kind, "agent.updated")
+        XCTAssertEqual(event.payload["value"], .number(7))
+    }
+
+    func testNDJSONLineLimitAllowsBoundaryAndRejectsOverflow() {
+        XCTAssertNoThrow(try SocketRPC.validateLineLength(SocketRPC.maximumLineBytes))
+        XCTAssertThrowsError(
+            try SocketRPC.validateLineLength(SocketRPC.maximumLineBytes + 1)
+        )
+    }
+
+    private func receiveTimeout(fd: Int32) throws -> timeval {
+        var timeout = timeval()
+        var length = socklen_t(MemoryLayout<timeval>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, &length) == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: nil
+            )
+        }
+        return timeout
+    }
 }
