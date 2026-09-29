@@ -57,13 +57,13 @@ class TestEmptyAgentsNext(unittest.TestCase):
             "到 Mac 上的 herdr 里启动 Agent。",
         )
 
-    def test_does_not_retouch_search_or_files(self) -> None:
+    def test_other_empty_states_keep_their_recovery_actions(self) -> None:
         files = FILES.read_text(encoding="utf-8")
         search = SEARCH.read_text(encoding="utf-8")
         self.assertIn('Text("No matches")', search)
         self.assertIn('"Empty Folder"', files)
         self.assertIn("This folder contains no visible items.", files)
-        self.assertNotIn('Button("Show hidden files")', files)
+        self.assertIn('Button("Show hidden files")', files)
 
 
 if __name__ == "__main__":

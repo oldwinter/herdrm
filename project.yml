@@ -66,15 +66,15 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
         COMBINE_HIDPI_IMAGES: YES
-        CODE_SIGN_STYLE: Manual
-        DEVELOPMENT_TEAM: NCFNX3LJ83
         LOCALIZATION_PREFERS_STRING_CATALOGS: YES
       configs:
         Debug:
-          # real identity so UserNotifications & friends work in dev builds
-          CODE_SIGN_IDENTITY: "Developer ID Application: MOE AI LLC (NCFNX3LJ83)"
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "-"
           ONLY_ACTIVE_ARCH: YES
         Release:
+          CODE_SIGN_STYLE: Manual
+          DEVELOPMENT_TEAM: NCFNX3LJ83
           CODE_SIGN_IDENTITY: "Developer ID Application: MOE AI LLC (NCFNX3LJ83)"
           ONLY_ACTIVE_ARCH: NO
           ARCHS: "arm64 x86_64"
@@ -120,10 +120,12 @@ targets:
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: NCFNX3LJ83
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         # The bundled libssh2/OpenSSL xcframeworks ship arm64 device + arm64
         # simulator slices only (see Packages/HerdrSSH/Artifacts/PROVENANCE.md).
         ARCHS: arm64
         ONLY_ACTIVE_ARCH: NO
         EXCLUDED_ARCHS__sdk_iphonesimulator__: x86_64
+      configs:
+        Release:
+          DEVELOPMENT_TEAM: NCFNX3LJ83

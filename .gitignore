@@ -9,3 +9,5 @@ Sources/HerdrM/Info.plist
 xcuserdata/
 build-rel/
 build-ios/
+__pycache__/
+*.py[cod]
