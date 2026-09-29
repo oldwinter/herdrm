@@ -39,6 +39,7 @@ class TestEmptyAgentsNext(unittest.TestCase):
 
     def test_detail_does_not_say_pick_when_empty(self) -> None:
         source = MOBILE.read_text(encoding="utf-8")
+        self.assertIn("@MainActor", source)
         self.assertIn("isConnectedEmptyAgents(model)", source)
         self.assertIn("EmptyAgentsGuidance(model: model, compact: false)", source)
         self.assertIn(

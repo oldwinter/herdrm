@@ -1,6 +1,7 @@
 import HerdrKit
 import SwiftUI
 
+@MainActor
 private func isConnectedEmptyAgents(_ model: MobileAppModel) -> Bool {
     if case .connected = model.selectedConnectionState {
         return model.agents.isEmpty
